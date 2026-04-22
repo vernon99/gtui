@@ -5,8 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GTUI</title>
   <link rel="stylesheet" href="static/css/app.css">
+  <script>
+    (() => {
+      const platform = navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || "";
+      document.documentElement.classList.toggle("tauri-macos", Boolean(window.__TAURI__) && /mac/i.test(platform));
+    })();
+  </script>
 </head>
 <body>
+  <header class="app-chrome" data-tauri-drag-region aria-label="Window title bar">
+    <div class="app-chrome-title">Gas Town UI</div>
+  </header>
+
   <main class="shell">
     <section class="panel metrics-panel">
       <div class="panel-head">

@@ -93,6 +93,28 @@
       margin: 14px auto 26px;
     }
 
+    .app-chrome {
+      display: none;
+    }
+
+    .tauri-macos .app-chrome {
+      display: grid;
+      grid-template-columns: minmax(120px, 1fr) auto minmax(120px, 1fr);
+      align-items: center;
+      height: 72px;
+      padding: 0 24px;
+      color: rgba(242, 234, 220, 0.78);
+      user-select: none;
+    }
+
+    .app-chrome-title {
+      grid-column: 2;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      line-height: 1;
+      pointer-events: none;
+    }
+
     .hero {
       display: grid;
       grid-template-columns: minmax(0, 1.35fr) minmax(360px, 0.95fr);

@@ -8,6 +8,13 @@ import {
   transcriptTitleNoun,
 } from "./renderers/index.js";
 
+    function syncWindowChrome() {
+      const platform = navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || "";
+      document.documentElement.classList.toggle("tauri-macos", Boolean(window.__TAURI__) && /mac/i.test(platform));
+    }
+
+    syncWindowChrome();
+
     const { invoke } = window.__TAURI__.core;
 
     const PRIMARY_TERMINAL_FETCH_TIMEOUT_MS = 6000;
