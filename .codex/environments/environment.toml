@@ -1,0 +1,10 @@
+version = 1
+name = "gtui"
+
+[setup]
+script = ""
+
+[[actions]]
+name = "Rebuild and Run"
+icon = "run"
+command = "./scripts/rebuild_and_run_tauri.sh"
