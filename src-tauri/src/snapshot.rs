@@ -18,10 +18,10 @@ use serde_json::{json, Value};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
-use crate::command::{run_command, RunOptions};
+use crate::command::{display_command, run_command, RunOptions};
 use crate::config::POLL_INTERVAL;
 use crate::models::{
-    default_status_legend, Activity, Metrics, StatusSummary, Timings, WorkspaceSnapshot,
+    default_status_legend, Activity, AgentInfo, Metrics, StatusSummary, Timings, WorkspaceSnapshot,
 };
 use crate::parse::{now_iso, parse_feed, parse_status_summary};
 use crate::sessions::{ClaudeCache, CodexCache};
@@ -258,6 +258,462 @@ impl SnapshotStore {
             .lock()
             .expect("claude cache lock poisoned");
         f(&mut cache)
+    }
+
+    /// Look up a repo's root path by id from the current snapshot.
+    /// Mirrors `SnapshotStore.get_repo_root` in Python.
+    pub fn get_repo_root(&self, repo_id: &str) -> Option<String> {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .expect("snapshot state lock poisoned");
+        state
+            .snapshot
+            .git
+            .as_object()
+            .and_then(|obj| obj.get("repos"))
+            .and_then(Value::as_array)
+            .and_then(|repos| {
+                repos
+                    .iter()
+                    .find(|r| r.get("id").and_then(Value::as_str) == Some(repo_id))
+                    .cloned()
+            })
+            .and_then(|repo| repo.get("root").and_then(Value::as_str).map(String::from))
+    }
+
+    /// Look up a graph node (issue) by id. Returns a deep clone.
+    pub fn get_node(&self, node_id: &str) -> Option<Value> {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .expect("snapshot state lock poisoned");
+        state
+            .snapshot
+            .graph
+            .as_object()
+            .and_then(|obj| obj.get("nodes"))
+            .and_then(Value::as_array)
+            .and_then(|nodes| {
+                nodes
+                    .iter()
+                    .find(|n| n.get("id").and_then(Value::as_str) == Some(node_id))
+                    .cloned()
+            })
+    }
+
+    /// Look up an agent by its target string (e.g. `gtui/polecats/nux`).
+    pub fn get_agent(&self, target: &str) -> Option<AgentInfo> {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .expect("snapshot state lock poisoned");
+        state
+            .snapshot
+            .agents
+            .iter()
+            .find(|a| a.target == target)
+            .cloned()
+    }
+
+    /// Current tmux socket name as parsed from `gt status --fast`.
+    pub fn get_tmux_socket(&self) -> String {
+        self.inner
+            .state
+            .lock()
+            .expect("snapshot state lock poisoned")
+            .snapshot
+            .status
+            .tmux_socket
+            .clone()
+    }
+
+    /// Current services list as parsed from `gt status --fast`.
+    pub fn get_services(&self) -> Vec<String> {
+        self.inner
+            .state
+            .lock()
+            .expect("snapshot state lock poisoned")
+            .snapshot
+            .status
+            .services
+            .clone()
+    }
+
+    /// Port of `SnapshotStore.fetch_diff` — compute `git show` for a repo+sha
+    /// and truncate to 500 lines. Returns a typed payload identical in JSON
+    /// shape to the Python response.
+    pub async fn fetch_diff(&self, repo_id: &str, sha: &str) -> Result<CachedGitDiff, String> {
+        let repo_root = self
+            .get_repo_root(repo_id)
+            .ok_or_else(|| format!("Unknown repo id: {repo_id}"))?;
+        let result = run_command(
+            &[
+                "git",
+                "-C",
+                &repo_root,
+                "show",
+                "--stat",
+                "--patch",
+                "--find-renames",
+                "--format=fuller",
+                "--no-ext-diff",
+                sha,
+            ],
+            &self.inner.gt_root,
+            RunOptions::default().with_timeout(Duration::from_secs(5)),
+        )
+        .await;
+        if !result.ok {
+            return Err(result.error);
+        }
+        let text = result
+            .data
+            .as_ref()
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let mut lines: Vec<String> = text.split('\n').map(String::from).collect();
+        let truncated = if lines.len() > 500 {
+            lines.truncate(500);
+            lines.push(String::new());
+            lines.push("[gtui] diff truncated to 500 lines".to_string());
+            true
+        } else {
+            false
+        };
+        Ok(CachedGitDiff {
+            repo_id: repo_id.to_string(),
+            sha: sha.to_string(),
+            text: lines.join("\n"),
+            truncated,
+        })
+    }
+
+    /// Send a `gt nudge` asking the target agent to pause. Mirrors
+    /// `SnapshotStore.pause_agent` in Python. Returns the recorded action
+    /// payload (also appended to the action history).
+    pub async fn pause_agent(&self, target: &str) -> Result<Value, String> {
+        let message = "Pause after your current step. Do not take new work or \
+                       mutate state until further instruction from GTUI. Reply \
+                       with a short status summary.";
+        let command: [&str; 7] = [
+            "gt",
+            "nudge",
+            target,
+            "--mode",
+            "wait-idle",
+            "--message",
+            message,
+        ];
+        let result = run_command(
+            &command,
+            &self.inner.gt_root,
+            RunOptions::default().with_timeout(Duration::from_secs(4)),
+        )
+        .await;
+        let action = json!({
+            "kind": "pause-agent",
+            "target": target,
+            "command": display_command(&command),
+            "ok": result.ok,
+            "output": action_output(&result),
+            "timestamp": now_iso(),
+        });
+        self.record_action(action.clone());
+        let _ = self.refresh_once().await;
+        Ok(action)
+    }
+
+    /// Send a free-form `gt nudge` to a target agent. Mirrors
+    /// `SnapshotStore.inject_instruction` in Python.
+    pub async fn inject_instruction(&self, target: &str, message: &str) -> Result<Value, String> {
+        if message.trim().is_empty() {
+            return Err("Instruction message is empty.".to_string());
+        }
+        let command: [&str; 7] = [
+            "gt",
+            "nudge",
+            target,
+            "--mode",
+            "wait-idle",
+            "--message",
+            message,
+        ];
+        let result = run_command(
+            &command,
+            &self.inner.gt_root,
+            RunOptions::default().with_timeout(Duration::from_secs(4)),
+        )
+        .await;
+        let action = json!({
+            "kind": "inject-instruction",
+            "target": target,
+            "command": display_command(&command),
+            "ok": result.ok,
+            "output": action_output(&result),
+            "timestamp": now_iso(),
+        });
+        self.record_action(action.clone());
+        let _ = self.refresh_once().await;
+        Ok(action)
+    }
+
+    /// Port of `SnapshotStore.retry_task`. Uses the graph node's stored status
+    /// to pick between `gt unsling` (hooked/running) and `gt release`
+    /// (in_progress). Returns the recorded action payload.
+    pub async fn retry_task(&self, task_id: &str) -> Result<Value, String> {
+        let node = self
+            .get_node(task_id)
+            .ok_or_else(|| format!("Unknown task: {task_id}"))?;
+        let status = node.get("status").and_then(Value::as_str).unwrap_or("");
+        let ui_status = node.get("ui_status").and_then(Value::as_str).unwrap_or("");
+        let command: Vec<String> = if status == "hooked" || ui_status == "running" {
+            let target = node
+                .get("agent_targets")
+                .and_then(Value::as_array)
+                .and_then(|arr| arr.first())
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    format!("Task {task_id} is marked running but no hooked agent was found.")
+                })?;
+            vec![
+                "gt".into(),
+                "unsling".into(),
+                task_id.into(),
+                target.into(),
+                "--force".into(),
+            ]
+        } else if status == "in_progress" {
+            vec![
+                "gt".into(),
+                "release".into(),
+                task_id.into(),
+                "-r".into(),
+                "GTUI retry requested".into(),
+            ]
+        } else {
+            return Err(format!(
+                "Task {task_id} is not in a retryable running state."
+            ));
+        };
+
+        let result = run_command(
+            &command,
+            &self.inner.gt_root,
+            RunOptions::default().with_timeout(Duration::from_secs(4)),
+        )
+        .await;
+        let action = json!({
+            "kind": "retry-task",
+            "task_id": task_id,
+            "command": display_command(&command),
+            "ok": result.ok,
+            "output": action_output(&result),
+            "timestamp": now_iso(),
+        });
+        self.record_action(action.clone());
+        let _ = self.refresh_once().await;
+        Ok(action)
+    }
+
+    /// Port of `SnapshotStore.get_terminal_state`. Returns the agent snapshot
+    /// plus a captured pane transcript when tmux is reachable. Until the
+    /// upstream agent collector lands, this returns `Unknown terminal target`
+    /// for every call — matching what the Python server would do before
+    /// agents are populated.
+    pub async fn get_terminal_state(&self, target: &str) -> Result<Value, String> {
+        let agent = self
+            .get_agent(target)
+            .ok_or_else(|| format!("Unknown terminal target: {target}"))?;
+
+        let tmux_socket = self.get_tmux_socket();
+        let pane_id = agent
+            .hook
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let tmux_target = if !pane_id.is_empty() {
+            pane_id.clone()
+        } else {
+            agent.session_name.clone()
+        };
+
+        let mut log_lines: Vec<Value> = Vec::new();
+        let mut capture_error = String::new();
+        if !tmux_socket.is_empty() && !tmux_target.is_empty() {
+            let capture = run_command(
+                &[
+                    "tmux",
+                    "-L",
+                    tmux_socket.as_str(),
+                    "capture-pane",
+                    "-p",
+                    "-t",
+                    tmux_target.as_str(),
+                    "-S",
+                    "-240",
+                ],
+                &self.inner.gt_root,
+                RunOptions::default().with_timeout(Duration::from_secs(1)),
+            )
+            .await;
+            if capture.ok {
+                let text = capture.data.as_ref().and_then(Value::as_str).unwrap_or("");
+                log_lines = text
+                    .lines()
+                    .map(|line| Value::String(line.trim_end().to_string()))
+                    .collect();
+            } else {
+                capture_error = capture.error;
+            }
+        }
+
+        let services: Vec<Value> = self.get_services().into_iter().map(Value::String).collect();
+
+        Ok(json!({
+            "target": agent.target,
+            "label": agent.label,
+            "role": agent.role,
+            "scope": agent.scope,
+            "kind": agent.kind,
+            "has_session": agent.has_session,
+            "runtime_state": agent.runtime_state,
+            "current_path": agent.current_path,
+            "session_name": agent.session_name,
+            "pane_id": pane_id,
+            "hook": agent.hook,
+            "events": agent.events,
+            "log_lines": log_lines,
+            "services": services,
+            "capture_error": capture_error,
+            "generated_at": now_iso(),
+        }))
+    }
+
+    /// Port of `SnapshotStore.write_terminal`. Sends keystrokes to the
+    /// target's tmux pane. Returns the recorded action payload on success.
+    pub async fn write_terminal(&self, target: &str, message: &str) -> Result<Value, String> {
+        if message.trim().is_empty() {
+            return Err("Terminal message is empty.".to_string());
+        }
+        let agent = self
+            .get_agent(target)
+            .ok_or_else(|| format!("Unknown terminal target: {target}"))?;
+        if !agent.has_session {
+            return Err(format!(
+                "{target} does not currently have a live tmux session."
+            ));
+        }
+        let tmux_socket = self.get_tmux_socket();
+        let pane_id = agent
+            .hook
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let tmux_target = if !pane_id.is_empty() {
+            pane_id
+        } else {
+            agent.session_name.clone()
+        };
+        if tmux_socket.is_empty() || tmux_target.is_empty() {
+            return Err(format!(
+                "No live tmux pane is known for {target}. Refresh the page and try again."
+            ));
+        }
+
+        let mut last_command: Vec<String> = Vec::new();
+        let mut last_error: Option<String> = None;
+        let lines: Vec<&str> = if message.contains('\n') {
+            message.split('\n').collect()
+        } else {
+            vec![message]
+        };
+        for line in lines {
+            if !line.is_empty() {
+                let cmd = vec![
+                    "tmux".to_string(),
+                    "-L".to_string(),
+                    tmux_socket.clone(),
+                    "send-keys".to_string(),
+                    "-t".to_string(),
+                    tmux_target.clone(),
+                    "-l".to_string(),
+                    line.to_string(),
+                ];
+                last_command = cmd.clone();
+                let r = run_command(
+                    &cmd,
+                    &self.inner.gt_root,
+                    RunOptions::default().with_timeout(Duration::from_secs(2)),
+                )
+                .await;
+                if !r.ok {
+                    last_error = Some(r.error);
+                    break;
+                }
+            }
+            let enter = vec![
+                "tmux".to_string(),
+                "-L".to_string(),
+                tmux_socket.clone(),
+                "send-keys".to_string(),
+                "-t".to_string(),
+                tmux_target.clone(),
+                "Enter".to_string(),
+            ];
+            last_command = enter.clone();
+            let r = run_command(
+                &enter,
+                &self.inner.gt_root,
+                RunOptions::default().with_timeout(Duration::from_secs(2)),
+            )
+            .await;
+            if !r.ok {
+                last_error = Some(r.error);
+                break;
+            }
+        }
+
+        if let Some(err) = last_error {
+            if err.contains("can't find window") || err.contains("can't find pane") {
+                return Err(format!(
+                    "{target} has a stale tmux pane reference. Refresh GTUI and try again."
+                ));
+            }
+            return Err(err);
+        }
+
+        let action = json!({
+            "kind": "write-terminal",
+            "target": target,
+            "command": display_command(&last_command),
+            "ok": true,
+            "output": format!("Sent to {target}"),
+            "timestamp": now_iso(),
+        });
+        self.record_action(action.clone());
+        Ok(action)
+    }
+}
+
+/// Collapse a successful `CommandResult` payload into the `output` string
+/// that action records surface. Failures surface the error text instead.
+fn action_output(result: &crate::command::CommandResult) -> String {
+    if result.ok {
+        result
+            .data
+            .as_ref()
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    } else {
+        result.error.clone()
     }
 }
 

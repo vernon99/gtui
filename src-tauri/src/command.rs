@@ -270,9 +270,11 @@ where
     }
 }
 
-fn display_command(args: &[String]) -> String {
+/// Render a `shlex`-style quoted representation of an argv, matching the
+/// Python `display_command` helper used throughout the action records.
+pub fn display_command<S: AsRef<str>>(args: &[S]) -> String {
     args.iter()
-        .map(|a| shell_quote(a))
+        .map(|a| shell_quote(a.as_ref()))
         .collect::<Vec<_>>()
         .join(" ")
 }
