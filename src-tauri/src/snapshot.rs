@@ -34,6 +34,29 @@ pub const ACTION_HISTORY_LIMIT: usize = 24;
 /// Number of actions surfaced on each snapshot (matches Python `[:12]`).
 pub const SNAPSHOT_ACTION_LIMIT: usize = 12;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalSendMode {
+    CodexPaste,
+    ClaudePaste,
+    LineKeys,
+}
+
+fn normalize_command_name(command: &str) -> String {
+    Path::new(command.trim())
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+fn terminal_send_mode(command: &str) -> TerminalSendMode {
+    match normalize_command_name(command).as_str() {
+        "codex" => TerminalSendMode::CodexPaste,
+        "claude" | "claude.exe" | "node" => TerminalSendMode::ClaudePaste,
+        _ => TerminalSendMode::LineKeys,
+    }
+}
+
 /// Cached git diff entry. `text` is pre-truncated (≤ 500 lines plus a trailing
 /// marker) just like the Python side so downstream consumers don't re-pay the
 /// cost.
@@ -705,26 +728,117 @@ impl SnapshotStore {
 
         let mut last_command: Vec<String> = Vec::new();
         let mut last_error: Option<String> = None;
-        let lines: Vec<&str> = if message.contains('\n') {
-            message.split('\n').collect()
-        } else {
-            vec![message]
-        };
-        for line in lines {
-            if !line.is_empty() {
-                let cmd = vec![
+        let send_mode = terminal_send_mode(&agent.current_command);
+        if matches!(
+            send_mode,
+            TerminalSendMode::CodexPaste | TerminalSendMode::ClaudePaste
+        ) {
+            let load_buffer = vec![
+                "tmux".to_string(),
+                "-L".to_string(),
+                tmux_socket.clone(),
+                "load-buffer".to_string(),
+                "-".to_string(),
+            ];
+            last_command = load_buffer.clone();
+            let load_result = run_command(
+                &load_buffer,
+                &self.inner.gt_root,
+                RunOptions::default()
+                    .with_timeout(Duration::from_secs(2))
+                    .with_stdin(message),
+            )
+            .await;
+            if !load_result.ok {
+                last_error = Some(load_result.error);
+            } else {
+                let mut commands = vec![vec![
+                    "tmux".to_string(),
+                    "-L".to_string(),
+                    tmux_socket.clone(),
+                    "paste-buffer".to_string(),
+                    "-d".to_string(),
+                    "-p".to_string(),
+                    "-t".to_string(),
+                    tmux_target.clone(),
+                ]];
+                if send_mode == TerminalSendMode::CodexPaste {
+                    commands.push(vec![
+                        "tmux".to_string(),
+                        "-L".to_string(),
+                        tmux_socket.clone(),
+                        "send-keys".to_string(),
+                        "-t".to_string(),
+                        tmux_target.clone(),
+                        "Escape".to_string(),
+                    ]);
+                }
+                commands.push(vec![
                     "tmux".to_string(),
                     "-L".to_string(),
                     tmux_socket.clone(),
                     "send-keys".to_string(),
                     "-t".to_string(),
                     tmux_target.clone(),
-                    "-l".to_string(),
-                    line.to_string(),
+                    "Enter".to_string(),
+                ]);
+
+                for cmd in commands {
+                    last_command = cmd.clone();
+                    let r = run_command(
+                        &cmd,
+                        &self.inner.gt_root,
+                        RunOptions::default().with_timeout(Duration::from_secs(2)),
+                    )
+                    .await;
+                    if !r.ok {
+                        last_error = Some(r.error);
+                        break;
+                    }
+                }
+            }
+        } else {
+            let lines: Vec<&str> = if message.contains('\n') {
+                message.split('\n').collect()
+            } else {
+                vec![message]
+            };
+            for line in lines {
+                if !line.is_empty() {
+                    let cmd = vec![
+                        "tmux".to_string(),
+                        "-L".to_string(),
+                        tmux_socket.clone(),
+                        "send-keys".to_string(),
+                        "-t".to_string(),
+                        tmux_target.clone(),
+                        "-l".to_string(),
+                        line.to_string(),
+                    ];
+                    last_command = cmd.clone();
+                    let r = run_command(
+                        &cmd,
+                        &self.inner.gt_root,
+                        RunOptions::default().with_timeout(Duration::from_secs(2)),
+                    )
+                    .await;
+                    if !r.ok {
+                        last_error = Some(r.error);
+                        break;
+                    }
+                }
+                let enter = vec![
+                    "tmux".to_string(),
+                    "-L".to_string(),
+                    tmux_socket.clone(),
+                    "send-keys".to_string(),
+                    "-t".to_string(),
+                    tmux_target.clone(),
+                    "Enter".to_string(),
                 ];
-                last_command = cmd.clone();
+                last_command = enter.clone();
                 let r = run_command(
-                    &cmd,
+                    &enter,
                     &self.inner.gt_root,
                     RunOptions::default().with_timeout(Duration::from_secs(2)),
                 )
@@ -733,26 +847,6 @@ impl SnapshotStore {
                     last_error = Some(r.error);
                     break;
                 }
-            }
-            let enter = vec![
-                "tmux".to_string(),
-                "-L".to_string(),
-                tmux_socket.clone(),
-                "send-keys".to_string(),
-                "-t".to_string(),
-                tmux_target.clone(),
-                "Enter".to_string(),
-            ];
-            last_command = enter.clone();
-            let r = run_command(
-                &enter,
-                &self.inner.gt_root,
-                RunOptions::default().with_timeout(Duration::from_secs(2)),
-            )
-            .await;
-            if !r.ok {
-                last_error = Some(r.error);
-                break;
             }
         }
 
@@ -1336,6 +1430,17 @@ mod tests {
         assert_eq!(snap.gt_root, "/tmp/store-test");
         assert_eq!(snap.status_legend.len(), 7);
         assert_eq!(snap.alerts.len(), 0);
+    }
+
+    #[test]
+    fn terminal_send_mode_uses_buffered_paste_for_agent_tuis() {
+        assert_eq!(terminal_send_mode("codex"), TerminalSendMode::CodexPaste);
+        assert_eq!(
+            terminal_send_mode("/usr/local/bin/claude"),
+            TerminalSendMode::ClaudePaste
+        );
+        assert_eq!(terminal_send_mode("node"), TerminalSendMode::ClaudePaste);
+        assert_eq!(terminal_send_mode("zsh"), TerminalSendMode::LineKeys);
     }
 
     #[test]

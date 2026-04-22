@@ -144,6 +144,14 @@ def is_claude_command(command: str) -> bool:
     return normalize_command_name(command) in {"claude", "claude.exe", "node"}
 
 
+def terminal_send_mode(command: str) -> str:
+    if is_codex_command(command):
+        return "codex-paste"
+    if is_claude_command(command):
+        return "claude-paste"
+    return "line-keys"
+
+
 def read_file_head(path: Path, max_bytes: int) -> str:
     try:
         with path.open("rb") as handle:
@@ -2469,7 +2477,8 @@ class SnapshotStore:
 
             last_result: CommandResult | None = None
             last_command: list[str] = []
-            if is_codex_command(current_command):
+            send_mode = terminal_send_mode(current_command)
+            if send_mode in {"codex-paste", "claude-paste"}:
                 load_buffer_command = ["tmux", "-L", tmux_socket, "load-buffer", "-"]
                 last_command = load_buffer_command
                 last_result = run_command(
@@ -2479,12 +2488,13 @@ class SnapshotStore:
                     stdin_text=message,
                 )
                 if last_result.ok:
-                    codex_commands = [
+                    paste_commands = [
                         ["tmux", "-L", tmux_socket, "paste-buffer", "-d", "-p", "-t", tmux_target],
-                        ["tmux", "-L", tmux_socket, "send-keys", "-t", tmux_target, "Escape"],
-                        ["tmux", "-L", tmux_socket, "send-keys", "-t", tmux_target, "Enter"],
                     ]
-                    for command in codex_commands:
+                    if send_mode == "codex-paste":
+                        paste_commands.append(["tmux", "-L", tmux_socket, "send-keys", "-t", tmux_target, "Escape"])
+                    paste_commands.append(["tmux", "-L", tmux_socket, "send-keys", "-t", tmux_target, "Enter"])
+                    for command in paste_commands:
                         last_command = command
                         last_result = run_command(command, cwd=self.gt_root, timeout=2.0)
                         if not last_result.ok:
