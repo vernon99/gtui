@@ -27,9 +27,10 @@ use crate::models::{
     default_status_legend, Activity, ActivityGroup, AgentInfo, Metrics, StatusSummary, Timings,
     WorkspaceSnapshot,
 };
-use crate::parse::{now_iso, parse_feed, parse_status_summary};
+use crate::parse::{normalize_lines, now_iso, parse_feed, parse_status_summary};
 use crate::sessions::{
-    claude_projects_root, find_claude_session, parse_claude_transcript, ClaudeCache, CodexCache,
+    claude_projects_root, codex_sessions_root, find_claude_session, find_codex_rollout,
+    parse_claude_transcript, parse_codex_transcript, ClaudeCache, CodexCache,
 };
 
 /// Maximum number of most-recent actions retained on the snapshot store.
@@ -557,12 +558,14 @@ impl SnapshotStore {
         Ok(action)
     }
 
-    /// Port of `SnapshotStore.get_terminal_state`. Returns the agent snapshot
-    /// plus a Claude transcript view when available, otherwise a captured pane
-    /// transcript when tmux is reachable.
+    /// Port of `SnapshotStore.get_terminal_state`. Performs a live tmux
+    /// rediscovery merge, picks Codex or Claude transcripts when available, and
+    /// otherwise falls back to a captured pane transcript. Refreshes events
+    /// with a fresh `gt feed --since 5m` filtered by target.
     pub async fn get_terminal_state(&self, target: &str) -> Result<Value, String> {
         let agent = self
-            .get_agent(target)
+            .discover_agent(target)
+            .await
             .ok_or_else(|| format!("Unknown terminal target: {target}"))?;
 
         let tmux_socket = self.get_tmux_socket();
@@ -584,14 +587,12 @@ impl SnapshotStore {
 
         let mut log_lines: Vec<Value> = Vec::new();
         let mut capture_error = String::new();
-        let (transcript_view, claude_view) = self.get_claude_view_for_agent(&agent);
-        if !tmux_socket.is_empty()
-            && !tmux_target.is_empty()
-            && !transcript_view
-                .get("available")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        {
+        let (transcript_view, codex_view, claude_view) = self.get_transcript_view_for_agent(&agent);
+        let transcript_available = transcript_view
+            .get("available")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !tmux_socket.is_empty() && !tmux_target.is_empty() && !transcript_available {
             let capture = run_command(
                 &[
                     "tmux",
@@ -610,16 +611,63 @@ impl SnapshotStore {
             .await;
             if capture.ok {
                 let text = capture.data.as_ref().and_then(Value::as_str).unwrap_or("");
-                log_lines = text
-                    .lines()
-                    .map(|line| Value::String(line.trim_end().to_string()))
+                log_lines = normalize_lines(text, 240)
+                    .into_iter()
+                    .map(Value::String)
                     .collect();
             } else {
                 capture_error = capture.error;
             }
         }
 
+        let mut events: Vec<Value> = tail_n(&agent.events, 6);
+        let feed_result = run_command(
+            &[
+                "gt",
+                "feed",
+                "--plain",
+                "--since",
+                "5m",
+                "--limit",
+                "40",
+                "--no-follow",
+            ],
+            &self.inner.gt_root,
+            RunOptions::default().with_timeout(Duration::from_secs(1)),
+        )
+        .await;
+        if feed_result.ok {
+            let text = feed_result
+                .data
+                .as_ref()
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let fresh_events: Vec<Value> = parse_feed(text)
+                .into_iter()
+                .filter(|event| event.get("actor").and_then(Value::as_str).unwrap_or("") == target)
+                .collect();
+            if !fresh_events.is_empty() {
+                events = tail_n(&fresh_events, 6);
+            }
+        }
+
+        let task_events = tail_n(&agent.task_events, 6);
+        let recent_task = if agent.recent_task.is_null() {
+            Value::Object(serde_json::Map::new())
+        } else {
+            agent.recent_task.clone()
+        };
+
         let services: Vec<Value> = self.get_services().into_iter().map(Value::String).collect();
+        let render_mode = if transcript_available {
+            transcript_view
+                .get("provider")
+                .and_then(Value::as_str)
+                .unwrap_or("terminal")
+                .to_string()
+        } else {
+            "terminal".to_string()
+        };
 
         Ok(json!({
             "target": agent.target,
@@ -634,15 +682,106 @@ impl SnapshotStore {
             "pane_id": pane_id,
             "current_command": agent.current_command,
             "hook": agent.hook,
-            "events": agent.events,
+            "events": events,
+            "task_events": task_events,
+            "recent_task": recent_task,
             "log_lines": log_lines,
+            "codex_view": codex_view,
             "claude_view": claude_view,
             "transcript_view": transcript_view,
-            "render_mode": if transcript_view.get("available").and_then(Value::as_bool).unwrap_or(false) { "claude" } else { "terminal" },
+            "render_mode": render_mode,
             "services": services,
             "capture_error": capture_error,
             "generated_at": now_iso(),
         }))
+    }
+
+    /// Port of `SnapshotStore.discover_agent`: overlay a fresh tmux scan on top
+    /// of the cached agent so terminal reads pick up the latest pane id,
+    /// current command, and path without waiting for the next poll cycle.
+    async fn discover_agent(&self, target: &str) -> Option<AgentInfo> {
+        let cached_agent = self.get_agent(target);
+        let tmux_socket = self.get_tmux_socket();
+        if tmux_socket.is_empty() {
+            return cached_agent;
+        }
+        let (live_agents, _errors, _ms) =
+            collect_tmux_agents(&self.inner.gt_root, &tmux_socket).await;
+        let live_agent = live_agents.into_iter().find(|a| a.target == target);
+        match (cached_agent, live_agent) {
+            (Some(cached), Some(live)) => Some(merge_agent_overlay(cached, live)),
+            (Some(cached), None) => Some(cached),
+            (None, Some(live)) => Some(live),
+            (None, None) => None,
+        }
+    }
+
+    fn get_transcript_view_for_agent(&self, agent: &AgentInfo) -> (Value, Value, Value) {
+        let codex_view = self.get_codex_view_for_agent(agent);
+        if codex_view
+            .get("available")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return (codex_view.clone(), codex_view, json!({}));
+        }
+        let (_, claude_view) = self.get_claude_view_for_agent(agent);
+        if claude_view
+            .get("available")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return (claude_view.clone(), json!({}), claude_view);
+        }
+        (json!({}), json!({}), json!({}))
+    }
+
+    fn get_codex_view_for_agent(&self, agent: &AgentInfo) -> Value {
+        if agent.current_path.is_empty() {
+            return json!({});
+        }
+        if normalize_command_name(&agent.current_command) != "codex" {
+            return json!({});
+        }
+        let codex_root = codex_sessions_root();
+        let current_path = agent.current_path.clone();
+        let view = self.with_codex_cache(|cache| {
+            let rollout = find_codex_rollout(cache, &codex_root, &current_path, Instant::now())?;
+            let path_text = rollout.get("path").and_then(Value::as_str)?;
+            let path = PathBuf::from(path_text);
+            let mut view = parse_codex_transcript(cache, &path);
+            if !view
+                .get("available")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return None;
+            }
+            if let Some(obj) = view.as_object_mut() {
+                obj.insert(
+                    "cwd".into(),
+                    Value::String(
+                        rollout
+                            .get("cwd")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                    ),
+                );
+                obj.insert(
+                    "session_id".into(),
+                    Value::String(
+                        rollout
+                            .get("session_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                    ),
+                );
+            }
+            Some(view)
+        });
+        view.unwrap_or_else(|| json!({}))
     }
 
     fn get_claude_view_for_agent(&self, agent: &AgentInfo) -> (Value, Value) {
@@ -882,6 +1021,34 @@ impl SnapshotStore {
         self.record_action(action.clone());
         Ok(action)
     }
+}
+
+/// Return the last `n` entries of a slice, matching Python's `xs[-n:]`.
+fn tail_n<T: Clone>(items: &[T], n: usize) -> Vec<T> {
+    if items.len() <= n {
+        items.to_vec()
+    } else {
+        items[items.len() - n..].to_vec()
+    }
+}
+
+/// Overlay tmux-derived fields from a freshly scanned agent on top of a
+/// cached agent. Mirrors Python's `merged = deep_copy(cached); merged.update(live)`
+/// but restricted to the fields `collect_tmux_agents` actually populates so the
+/// hook, crew, polecat, and task-event state survive the refresh.
+fn merge_agent_overlay(cached: AgentInfo, live: AgentInfo) -> AgentInfo {
+    let mut merged = cached;
+    merged.target = live.target;
+    merged.label = live.label;
+    merged.role = live.role;
+    merged.scope = live.scope;
+    merged.kind = live.kind;
+    merged.has_session = live.has_session;
+    merged.current_path = live.current_path;
+    merged.session_name = live.session_name;
+    merged.pane_id = live.pane_id;
+    merged.current_command = live.current_command;
+    merged
 }
 
 /// Collapse a successful `CommandResult` payload into the `output` string
@@ -4745,6 +4912,115 @@ mod tests {
             .unwrap_or(false));
         assert!(!errors.is_empty(), "missing bd binary should surface");
     }
+
+    #[test]
+    fn tail_n_returns_last_entries() {
+        let items = vec![1, 2, 3, 4, 5];
+        assert_eq!(tail_n(&items, 2), vec![4, 5]);
+        assert_eq!(tail_n(&items, 10), vec![1, 2, 3, 4, 5]);
+        assert_eq!(tail_n::<i32>(&[], 3), Vec::<i32>::new());
+    }
+
+    #[test]
+    fn merge_agent_overlay_preserves_cached_hook_and_task_events() {
+        let cached = AgentInfo {
+            target: "gtui/polecats/nux".into(),
+            label: "nux".into(),
+            role: "polecat".into(),
+            scope: "gtui".into(),
+            kind: "external".into(),
+            has_session: false,
+            current_path: "/stale/path".into(),
+            session_name: "stale".into(),
+            pane_id: "%stale".into(),
+            current_command: "".into(),
+            hook: json!({"bead_id": "gui-cqe.12", "pane_id": "%hook"}),
+            events: vec![json!({"message": "old"})],
+            task_events: vec![json!({"kind": "assigned", "task_id": "gui-cqe.12"})],
+            recent_task: json!({"task_id": "gui-cqe.12"}),
+            ..AgentInfo::default()
+        };
+        let live = AgentInfo {
+            target: "gtui/polecats/nux".into(),
+            label: "gtui/polecats/nux".into(),
+            role: "polecat".into(),
+            scope: "gtui".into(),
+            kind: "tmux".into(),
+            has_session: true,
+            current_path: "/live/path".into(),
+            session_name: "live".into(),
+            pane_id: "%live".into(),
+            current_command: "claude".into(),
+            ..AgentInfo::default()
+        };
+        let merged = merge_agent_overlay(cached, live);
+        assert!(merged.has_session);
+        assert_eq!(merged.kind, "tmux");
+        assert_eq!(merged.pane_id, "%live");
+        assert_eq!(merged.current_command, "claude");
+        assert_eq!(merged.current_path, "/live/path");
+        assert_eq!(merged.session_name, "live");
+        assert_eq!(merged.hook["bead_id"], "gui-cqe.12");
+        assert_eq!(merged.task_events.len(), 1);
+        assert_eq!(merged.recent_task["task_id"], "gui-cqe.12");
+        assert_eq!(merged.events.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_terminal_state_returns_cached_agent_fields_and_defaults() {
+        let store = SnapshotStore::new(tempfile::tempdir().expect("tempdir").path().to_path_buf());
+        let snap = WorkspaceSnapshot {
+            agents: vec![AgentInfo {
+                target: "gtui/polecats/nux".into(),
+                label: "nux".into(),
+                role: "polecat".into(),
+                scope: "gtui".into(),
+                kind: "external".into(),
+                has_session: false,
+                current_path: "/tmp/nonexistent-path".into(),
+                current_command: "bash".into(),
+                hook: json!({"bead_id": "gui-cqe.12"}),
+                events: (0..10)
+                    .map(|n| json!({"message": format!("event {n}"), "actor": "other"}))
+                    .collect(),
+                task_events: (0..8)
+                    .map(|n| json!({"kind": "assigned", "task_id": format!("t-{n}")}))
+                    .collect(),
+                recent_task: json!({"task_id": "t-7"}),
+                ..AgentInfo::default()
+            }],
+            ..WorkspaceSnapshot::default()
+        };
+        store.install_snapshot(snap);
+        let state = store
+            .get_terminal_state("gtui/polecats/nux")
+            .await
+            .expect("terminal state");
+        assert_eq!(state["target"], "gtui/polecats/nux");
+        assert_eq!(state["hook"]["bead_id"], "gui-cqe.12");
+        // Events cap to last 6.
+        assert_eq!(state["events"].as_array().map(Vec::len), Some(6));
+        // Task events and recent_task round-trip.
+        assert_eq!(state["task_events"].as_array().map(Vec::len), Some(6));
+        assert_eq!(state["recent_task"]["task_id"], "t-7");
+        // Transcript views default to empty maps, not nulls.
+        assert!(state["codex_view"].is_object());
+        assert!(state["claude_view"].is_object());
+        assert!(state["transcript_view"].is_object());
+        assert_eq!(state["render_mode"], "terminal");
+        assert!(state["log_lines"].is_array());
+        assert!(state["services"].is_array());
+    }
+
+    #[tokio::test]
+    async fn get_terminal_state_errors_for_unknown_target_via_store() {
+        let store = SnapshotStore::new(tempfile::tempdir().expect("tempdir").path().to_path_buf());
+        let err = store
+            .get_terminal_state("gtui/polecats/ghost")
+            .await
+            .expect_err("unknown target should error");
+        assert!(err.contains("Unknown terminal target"), "got: {err}");
+    }
 }
 
 #[cfg(test)]
@@ -5410,11 +5686,7 @@ mod build_activity_groups_tests {
         let live = agent("gtui/b", "", vec![], true, "");
         let statey = agent("gtui/c", "", vec![], false, "idle");
         let silent = agent("gtui/d", "", vec![], false, "");
-        let activity = build_activity_groups(
-            &[noisy, live, statey, silent],
-            &[],
-            &BTreeMap::new(),
-        );
+        let activity = build_activity_groups(&[noisy, live, statey, silent], &[], &BTreeMap::new());
         assert!(activity.groups.is_empty());
         let targets: Vec<&str> = activity
             .unassigned_agents
@@ -5454,13 +5726,12 @@ mod build_activity_groups_tests {
             task_node("task-stuck", "stuck", json!({})),
         ];
         let activity = build_activity_groups(&agents, &nodes, &BTreeMap::new());
-        let order: Vec<&str> = activity
-            .groups
-            .iter()
-            .map(|g| g.task_id.as_str())
-            .collect();
+        let order: Vec<&str> = activity.groups.iter().map(|g| g.task_id.as_str()).collect();
         // Non-system first (running, stuck, ready), then system nodes.
-        assert_eq!(order, vec!["task-running", "task-stuck", "task-ready", "sys-run"]);
+        assert_eq!(
+            order,
+            vec!["task-running", "task-stuck", "task-ready", "sys-run"]
+        );
     }
 
     #[test]

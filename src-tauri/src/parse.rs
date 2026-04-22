@@ -113,6 +113,26 @@ pub fn parse_feed(text: &str) -> Vec<Value> {
     events
 }
 
+/// Port of `normalize_lines` from Python: rstrip each line, trim leading and
+/// trailing blank lines, and cap to the last `limit` lines.
+pub fn normalize_lines(text: &str, limit: usize) -> Vec<String> {
+    let mut lines: Vec<String> = text
+        .split('\n')
+        .map(|line| line.trim_end_matches(['\r', ' ', '\t']).to_string())
+        .collect();
+    while lines.first().is_some_and(|line| line.trim().is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    if lines.len() > limit {
+        let start = lines.len() - limit;
+        lines = lines.split_off(start);
+    }
+    lines
+}
+
 /// Normalise a filesystem path for comparison. Matches `normalize_path_value`
 /// in Python: prefer `realpath` (symlink resolution) then `normpath`.
 pub fn normalize_path_value(path_text: &str) -> String {
@@ -332,5 +352,30 @@ raw passthrough line
     fn path_str_and_pathbuf_str_agree() {
         let p = std::path::PathBuf::from("/tmp/example");
         assert_eq!(path_str(p.as_path()), pathbuf_str(p.as_path()));
+    }
+
+    #[test]
+    fn normalize_lines_strips_and_caps() {
+        let lines = normalize_lines("\n\n  first  \nsecond\n   \n", 16);
+        assert_eq!(lines, vec!["  first".to_string(), "second".to_string()]);
+    }
+
+    #[test]
+    fn normalize_lines_keeps_tail_when_over_limit() {
+        let text = (1..=20)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lines = normalize_lines(&text, 5);
+        assert_eq!(
+            lines,
+            vec![
+                "line 16".to_string(),
+                "line 17".to_string(),
+                "line 18".to_string(),
+                "line 19".to_string(),
+                "line 20".to_string(),
+            ]
+        );
     }
 }

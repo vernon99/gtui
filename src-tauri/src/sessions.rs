@@ -672,6 +672,266 @@ pub fn parse_claude_transcript(cache: &mut ClaudeCache, path: &Path) -> Value {
     view
 }
 
+/// Root directory Codex CLI uses for its rollout transcripts.
+pub fn codex_sessions_root() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".codex")
+        .join("sessions")
+}
+
+/// Find the best Codex rollout for the given working directory.
+pub fn find_codex_rollout(
+    cache: &mut CodexCache,
+    codex_root: &Path,
+    current_path: &str,
+    now: Instant,
+) -> Option<Value> {
+    let mut best_meta: Option<Value> = None;
+    let mut best_score = -1;
+    for path in list_recent_codex_rollouts(cache, codex_root, now) {
+        let meta = get_codex_rollout_meta(cache, &path);
+        if meta.is_null() {
+            continue;
+        }
+        let cwd = meta.get("cwd").and_then(Value::as_str).unwrap_or("");
+        let score = match_path_score(current_path, cwd);
+        if score < 0 {
+            continue;
+        }
+        let modified_at = meta.get("mtime").and_then(Value::as_f64).unwrap_or(0.0);
+        let best_modified_at = best_meta
+            .as_ref()
+            .and_then(|best| best.get("mtime"))
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        if score > best_score || (score == best_score && modified_at > best_modified_at) {
+            best_score = score;
+            best_meta = Some(meta);
+        }
+    }
+    best_meta
+}
+
+/// Parse a Codex CLI JSONL rollout into the transcript view consumed by the
+/// frontend. Mirrors `SnapshotStore.parse_codex_transcript` in
+/// `webui/server.py`.
+pub fn parse_codex_transcript(cache: &mut CodexCache, path: &Path) -> Value {
+    let Some(signature) = FileSignature::of(path) else {
+        return Value::Null;
+    };
+    if let Some(cached) = get_cached_codex_transcript(cache, path) {
+        return cached;
+    }
+
+    let mut items: Vec<Value> = Vec::new();
+    let mut call_map: HashMap<String, Value> = HashMap::new();
+
+    for record in iter_jsonl_records(&read_full(path)) {
+        let timestamp = record
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let record_type = record.get("type").and_then(Value::as_str).unwrap_or("");
+        if record_type != "response_item" {
+            continue;
+        }
+        let payload = record
+            .get("payload")
+            .and_then(Value::as_object)
+            .cloned()
+            .map(Value::Object)
+            .unwrap_or(Value::Null);
+        let payload_type = payload
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let time = format_timestamp_short(&timestamp);
+
+        match payload_type.as_str() {
+            "message" => {
+                let role = payload.get("role").and_then(Value::as_str).unwrap_or("");
+                if role != "assistant" && role != "user" {
+                    continue;
+                }
+                let text = extract_message_text(payload.get("content"));
+                if text.is_empty() || is_hidden_transcript_message(&text) {
+                    continue;
+                }
+                let phase = payload
+                    .get("phase")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                items.push(json!({
+                    "kind": role,
+                    "phase": phase,
+                    "text": text,
+                    "time": time,
+                    "timestamp": timestamp,
+                }));
+            }
+            "function_call" => {
+                let tool_name = payload
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let call_id = payload
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let arguments = payload.get("arguments").cloned().unwrap_or(Value::Null);
+                let arguments_for_summary = if let Some(arg_str) = arguments.as_str() {
+                    serde_json::from_str::<Value>(arg_str).unwrap_or(arguments.clone())
+                } else {
+                    arguments.clone()
+                };
+                let summary = summarize_tool_call(&tool_name, &arguments_for_summary);
+                if !call_id.is_empty() {
+                    call_map.insert(
+                        call_id.clone(),
+                        json!({"tool": tool_name, "summary": summary}),
+                    );
+                }
+                items.push(json!({
+                    "kind": "tool_call",
+                    "tool": tool_name,
+                    "summary": summary,
+                    "call_id": call_id,
+                    "time": time,
+                    "timestamp": timestamp,
+                }));
+            }
+            "function_call_output" => {
+                let call_id = payload
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let tool_info = call_map.get(&call_id).cloned().unwrap_or(Value::Null);
+                let tool = tool_info
+                    .get("tool")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let output_text = stringify_tool_output(payload.get("output"));
+                items.push(json!({
+                    "kind": "tool_output",
+                    "tool": tool,
+                    "summary": summarize_tool_output(&output_text),
+                    "text": excerpt_tool_output(&output_text),
+                    "call_id": call_id,
+                    "time": time,
+                    "timestamp": timestamp,
+                }));
+            }
+            "reasoning" => {
+                let reasoning_item = json!({
+                    "kind": "reasoning",
+                    "summary": "Thinking...",
+                    "time": time,
+                    "timestamp": timestamp,
+                });
+                if items
+                    .last()
+                    .and_then(|item| item.get("kind"))
+                    .and_then(Value::as_str)
+                    == Some("reasoning")
+                {
+                    *items.last_mut().unwrap() = reasoning_item;
+                } else {
+                    items.push(reasoning_item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !items.is_empty() {
+        let trailing_reasoning = items
+            .last()
+            .filter(|item| item.get("kind").and_then(Value::as_str) == Some("reasoning"))
+            .cloned();
+        items.retain(|item| item.get("kind").and_then(Value::as_str) != Some("reasoning"));
+        if let Some(trailing) = trailing_reasoning {
+            items.push(trailing);
+        }
+    }
+
+    let view = json!({
+        "available": !items.is_empty(),
+        "provider": "codex",
+        "source": "codex-rollout",
+        "session_file": pathbuf_str(path),
+        "session_name": path.file_name().and_then(|name| name.to_str()).unwrap_or(""),
+        "revision": format!("{}:{}", signature.mtime_ns, signature.size),
+        "updated_at": iso_from_mtime_ns(signature.mtime_ns),
+        "items": items,
+    });
+    let _ = cache_codex_transcript(cache, path, view.clone());
+    view
+}
+
+fn extract_message_text(content: Option<&Value>) -> String {
+    let Some(array) = content.and_then(Value::as_array) else {
+        return String::new();
+    };
+    let mut chunks: Vec<String> = Vec::new();
+    for part in array {
+        let Some(obj) = part.as_object() else {
+            continue;
+        };
+        let part_type = obj.get("type").and_then(Value::as_str).unwrap_or("");
+        if part_type != "input_text" && part_type != "output_text" {
+            continue;
+        }
+        let text = obj
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !text.is_empty() {
+            chunks.push(text);
+        }
+    }
+    chunks.join("\n\n").trim().to_string()
+}
+
+fn is_hidden_transcript_message(text: &str) -> bool {
+    let normalized = text.trim();
+    if normalized.is_empty() {
+        return false;
+    }
+    if normalized.starts_with("<turn_aborted>") && normalized.ends_with("</turn_aborted>") {
+        return true;
+    }
+    if normalized.starts_with("# AGENTS.md instructions for ") {
+        return true;
+    }
+    false
+}
+
+fn stringify_tool_output(output: Option<&Value>) -> String {
+    match output {
+        None => String::new(),
+        Some(value) => {
+            if value.is_null() {
+                String::new()
+            } else if let Some(text) = value.as_str() {
+                text.to_string()
+            } else {
+                serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+            }
+        }
+    }
+}
+
 fn extract_claude_text_block(block: &Value) -> String {
     block
         .get("text")
@@ -999,5 +1259,96 @@ mod tests {
         let before = FileSignature::of(&path).unwrap();
         let after = touch_append(&path, b"more\n");
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn parse_codex_transcript_folds_message_tool_and_reasoning_records() {
+        let dir = tempdir();
+        let path = write_jsonl(
+            dir.path(),
+            "rollout-1.jsonl",
+            &[
+                r#"{"type":"response_item","timestamp":"2026-04-22T10:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello codex"}]}}"#,
+                r#"{"type":"response_item","timestamp":"2026-04-22T10:00:01Z","payload":{"type":"reasoning"}}"#,
+                r#"{"type":"response_item","timestamp":"2026-04-22T10:00:02Z","payload":{"type":"function_call","name":"exec_command","call_id":"c1","arguments":"{\"cmd\":\"ls\"}"}}"#,
+                r#"{"type":"response_item","timestamp":"2026-04-22T10:00:03Z","payload":{"type":"function_call_output","call_id":"c1","output":"total 0\n"}}"#,
+                r#"{"type":"response_item","timestamp":"2026-04-22T10:00:04Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}"#,
+            ],
+        );
+        let mut cache = CodexCache::default();
+        let view = parse_codex_transcript(&mut cache, &path);
+        assert_eq!(view["available"], true);
+        assert_eq!(view["provider"], "codex");
+        let items = view["items"].as_array().expect("items array");
+        // reasoning is kept only if it's the trailing item — here it isn't, so
+        // it's dropped. We expect: user, tool_call, tool_output, assistant.
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[0]["kind"], "user");
+        assert_eq!(items[0]["text"], "hello codex");
+        assert_eq!(items[1]["kind"], "tool_call");
+        assert_eq!(items[1]["tool"], "exec_command");
+        assert_eq!(items[2]["kind"], "tool_output");
+        assert_eq!(items[2]["tool"], "exec_command");
+        assert_eq!(items[3]["kind"], "assistant");
+    }
+
+    #[test]
+    fn parse_codex_transcript_keeps_trailing_reasoning() {
+        let dir = tempdir();
+        let path = write_jsonl(
+            dir.path(),
+            "rollout-2.jsonl",
+            &[
+                r#"{"type":"response_item","timestamp":"2026-04-22T10:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}"#,
+                r#"{"type":"response_item","timestamp":"2026-04-22T10:00:01Z","payload":{"type":"reasoning"}}"#,
+            ],
+        );
+        let mut cache = CodexCache::default();
+        let view = parse_codex_transcript(&mut cache, &path);
+        let items = view["items"].as_array().expect("items array");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[1]["kind"], "reasoning");
+    }
+
+    #[test]
+    fn parse_codex_transcript_hides_turn_aborted_and_agents_md() {
+        let dir = tempdir();
+        let path = write_jsonl(
+            dir.path(),
+            "rollout-3.jsonl",
+            &[
+                r##"{"type":"response_item","timestamp":"2026-04-22T10:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<turn_aborted>stop</turn_aborted>"}]}}"##,
+                r##"{"type":"response_item","timestamp":"2026-04-22T10:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /tmp/foo"}]}}"##,
+                r##"{"type":"response_item","timestamp":"2026-04-22T10:00:02Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"real input"}]}}"##,
+            ],
+        );
+        let mut cache = CodexCache::default();
+        let view = parse_codex_transcript(&mut cache, &path);
+        let items = view["items"].as_array().expect("items array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["text"], "real input");
+    }
+
+    #[test]
+    fn find_codex_rollout_picks_best_scoring_cwd() {
+        let dir = tempdir();
+        let sessions = dir.path();
+        let shallow = write_jsonl(
+            sessions,
+            "rollout-shallow.jsonl",
+            &[r#"{"type":"session_meta","payload":{"id":"shallow","cwd":"/tmp"}}"#],
+        );
+        let deep = write_jsonl(
+            sessions,
+            "rollout-deep.jsonl",
+            &[r#"{"type":"session_meta","payload":{"id":"deep","cwd":"/tmp/project/subdir"}}"#],
+        );
+        let mut cache = CodexCache::default();
+        let meta = find_codex_rollout(&mut cache, sessions, "/tmp/project/subdir", Instant::now())
+            .expect("match");
+        assert_eq!(meta["session_id"], "deep");
+        // Sanity: both files are visible to the list.
+        let files = list_recent_codex_rollouts(&mut cache, sessions, Instant::now());
+        assert!(files.contains(&shallow) && files.contains(&deep));
     }
 }
