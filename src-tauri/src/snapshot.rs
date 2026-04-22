@@ -8,7 +8,7 @@
 //! stubbed here — they're tracked as follow-on beads. Everything the store
 //! *does* own — locks, polling loop, action ring buffer, caches — is in place.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -1003,22 +1003,70 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
     let (agents, hook_by_issue, agent_errors, agent_ms) =
         collect_agents(gt_root, &status_summary, &crews, &feed_events).await;
     errors.extend(agent_errors);
-    let _ = hook_by_issue; // Consumed by collect_bead_data in a later bead.
 
     // Discover bead stores (hq + per-rig) and collect the per-store summary.
-    // Graph / node / merge-link construction that `collect_bead_data` also
-    // produces is tracked in the next bead (gui-cqe.6) and left stubbed here.
     let bead_stores = discover_bead_stores(gt_root);
     let (store_summaries, bead_store_snapshots, store_errors, bead_ms) =
         collect_bead_store_summaries(&bead_stores).await;
     errors.extend(store_errors);
-    let _ = bead_store_snapshots; // Consumed by collect_bead_data in gui-cqe.6.
 
-    // Downstream collectors are stubbed for this bead — future ports will
-    // flesh these out. We keep the JSON shape the frontend already consumes.
+    // Fold the raw per-store snapshots into compacted graph nodes/edges,
+    // merge links, and the consolidated blocked/hooked sets.
+    let bead_data = collect_bead_data(&bead_store_snapshots, &hook_by_issue);
+    let _ = &bead_data.merge_links; // Consumed by collect_git_memory in gui-cqe.7.
+    let _ = &bead_data.blocked_ids; // Exposed on future IPC surfaces.
+    let _ = &bead_data.hooked_ids;
+
+    let mut running_tasks: u32 = 0;
+    let mut stuck_tasks: u32 = 0;
+    let mut ready_tasks: u32 = 0;
+    let mut done_tasks: u32 = 0;
+    let mut ice_tasks: u32 = 0;
+    let mut system_running: u32 = 0;
+    let mut stored_status_counts: BTreeMap<String, u32> = BTreeMap::new();
+    for node in &bead_data.nodes {
+        if node.get("kind").and_then(Value::as_str) != Some("task") {
+            continue;
+        }
+        let is_system = node
+            .get("is_system")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let ui_status = node.get("ui_status").and_then(Value::as_str).unwrap_or("");
+        if is_system {
+            if ui_status == "running" {
+                system_running += 1;
+            }
+            continue;
+        }
+        let stored = node
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        *stored_status_counts.entry(stored).or_insert(0) += 1;
+        match ui_status {
+            "running" => running_tasks += 1,
+            "stuck" => stuck_tasks += 1,
+            "ready" => ready_tasks += 1,
+            "done" => done_tasks += 1,
+            "ice" => ice_tasks += 1,
+            _ => {}
+        }
+    }
+    let mut derived_status_counts: BTreeMap<String, u32> = BTreeMap::new();
+    derived_status_counts.insert("running".into(), running_tasks);
+    derived_status_counts.insert("stuck".into(), stuck_tasks);
+    derived_status_counts.insert("ready".into(), ready_tasks);
+    derived_status_counts.insert("done".into(), done_tasks);
+    derived_status_counts.insert("ice".into(), ice_tasks);
+
+    // Downstream collectors are still stubbed — git memory and convoy data
+    // come online in later beads and `finalize_graph` layers linked commits
+    // onto the nodes below.
     let graph = json!({
-        "nodes": Vec::<Value>::new(),
-        "edges": Vec::<Value>::new(),
+        "nodes": bead_data.nodes.clone(),
+        "edges": bead_data.edges.clone(),
     });
     let git = json!({
         "repos": Vec::<Value>::new(),
@@ -1030,11 +1078,27 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
         "task_index": {},
     });
 
-    let alerts = derive_alerts(&status_summary, &crews);
+    let active_agents = agents.iter().filter(|agent| agent.has_session).count() as u32;
+    let mut alerts = derive_alerts(&status_summary, &crews);
+    if running_tasks == 0 && ready_tasks > 0 && active_agents > 0 {
+        alerts.push("Agents are alive, but no product tasks are currently running.".to_string());
+    }
+    if stuck_tasks > 0 {
+        alerts.push(format!(
+            "{stuck_tasks} task node(s) are dependency-blocked."
+        ));
+    }
 
     let summary = Metrics {
-        active_agents: agents.iter().filter(|agent| agent.has_session).count() as u32,
+        running_tasks,
+        stuck_tasks,
+        ready_tasks,
+        done_tasks,
+        system_running,
+        active_agents,
         command_errors: errors.len() as u32,
+        stored_status_counts,
+        derived_status_counts,
         ..Metrics::default()
     };
 
@@ -1497,6 +1561,373 @@ async fn collect_bead_store_summaries(
     });
 
     (summaries, snapshots, errors, duration_ms)
+}
+
+/// Issue `issue_type` values that are rendered on the task graph. Anything
+/// else (messages, escalations, custom types) is filtered out unless it also
+/// qualifies as a system issue. Mirrors `GRAPH_ALLOWED_TYPES` in
+/// `webui/server.py`.
+const GRAPH_ALLOWED_TYPES: &[&str] = &["task", "bug", "feature", "chore", "decision", "epic"];
+
+fn metadata_block_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^([a-zA-Z0-9_.-]+):\s*(.+)$").expect("static regex"))
+}
+
+/// Parse a bead description's leading "key: value" metadata block. Mirrors
+/// `parse_simple_metadata_block` in `webui/server.py` — only the first 20
+/// lines are inspected, and each line must match a strict `key: value`
+/// regex.
+fn parse_simple_metadata_block(text: &str) -> HashMap<String, String> {
+    let mut metadata: HashMap<String, String> = HashMap::new();
+    let re = metadata_block_re();
+    for line in text.lines().take(20) {
+        let trimmed = line.trim();
+        if let Some(caps) = re.captures(trimmed) {
+            metadata.insert(caps[1].to_string(), caps[2].to_string());
+        }
+    }
+    metadata
+}
+
+fn issue_label_contains(issue: &Value, label: &str) -> bool {
+    issue
+        .get("labels")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().any(|v| v.as_str() == Some(label)))
+        .unwrap_or(false)
+}
+
+fn issue_is_merge(issue: &Value) -> bool {
+    if issue_label_contains(issue, "gt:merge-request") {
+        return true;
+    }
+    let description = issue
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let meta = parse_simple_metadata_block(description);
+    meta.contains_key("source_issue") && meta.contains_key("commit_sha")
+}
+
+fn issue_is_system(issue: &Value) -> bool {
+    if issue_label_contains(issue, "gt:rig") {
+        return true;
+    }
+    let issue_type = issue
+        .get("issue_type")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if issue_type == "molecule" {
+        return true;
+    }
+    let id = issue.get("id").and_then(Value::as_str).unwrap_or("");
+    if id.starts_with("hq-wisp-") {
+        return true;
+    }
+    let title = issue.get("title").and_then(Value::as_str).unwrap_or("");
+    if title.starts_with("mol-") {
+        return true;
+    }
+    false
+}
+
+fn issue_is_graph_noise(issue: &Value) -> bool {
+    let issue_type = issue
+        .get("issue_type")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !issue_type.is_empty()
+        && !GRAPH_ALLOWED_TYPES.contains(&issue_type)
+        && !issue_is_system(issue)
+    {
+        return true;
+    }
+    if issue_label_contains(issue, "gt:message") || issue_label_contains(issue, "gt:escalation") {
+        return true;
+    }
+    let id = issue.get("id").and_then(Value::as_str).unwrap_or("");
+    if id.starts_with("hq-cv-") {
+        return true;
+    }
+    false
+}
+
+fn derive_ui_status(
+    issue: &Value,
+    blocked_ids: &HashSet<String>,
+    hooked_ids: &HashSet<String>,
+) -> &'static str {
+    let status = issue
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("open");
+    let id = issue.get("id").and_then(Value::as_str).unwrap_or("");
+    if status == "closed" {
+        return "done";
+    }
+    if status == "hooked" || status == "in_progress" || hooked_ids.contains(id) {
+        return "running";
+    }
+    if status == "deferred" {
+        return "ice";
+    }
+    if status == "blocked" || blocked_ids.contains(id) {
+        return "stuck";
+    }
+    "ready"
+}
+
+/// Rust port of `compact_issue` in `webui/server.py`. Collapses a raw bead
+/// payload down to the fields the graph renderer needs, plus the derived
+/// `ui_status` / `is_system` labels.
+fn compact_issue(
+    issue: &Value,
+    blocked_ids: &HashSet<String>,
+    hooked_ids: &HashSet<String>,
+) -> Value {
+    json!({
+        "id": issue.get("id").and_then(Value::as_str).unwrap_or(""),
+        "title": issue.get("title").and_then(Value::as_str).unwrap_or(""),
+        "description": issue.get("description").and_then(Value::as_str).unwrap_or(""),
+        "status": issue.get("status").and_then(Value::as_str).unwrap_or(""),
+        "ui_status": derive_ui_status(issue, blocked_ids, hooked_ids),
+        "priority": issue.get("priority").cloned().unwrap_or(Value::Null),
+        "type": issue.get("issue_type").and_then(Value::as_str).unwrap_or(""),
+        "owner": issue.get("owner").and_then(Value::as_str).unwrap_or(""),
+        "assignee": issue.get("assignee").and_then(Value::as_str).unwrap_or(""),
+        "created_at": issue.get("created_at").and_then(Value::as_str).unwrap_or(""),
+        "updated_at": issue.get("updated_at").and_then(Value::as_str).unwrap_or(""),
+        "closed_at": issue.get("closed_at").and_then(Value::as_str).unwrap_or(""),
+        "parent": issue.get("parent").and_then(Value::as_str).unwrap_or(""),
+        "labels": issue.get("labels").cloned().unwrap_or_else(|| json!([])),
+        "dependency_count": issue.get("dependency_count").cloned().unwrap_or_else(|| json!(0)),
+        "dependent_count": issue.get("dependent_count").cloned().unwrap_or_else(|| json!(0)),
+        "blocked_by_count": issue.get("blocked_by_count").cloned().unwrap_or_else(|| json!(0)),
+        "blocked_by": issue.get("blocked_by").cloned().unwrap_or_else(|| json!([])),
+        "is_system": issue_is_system(issue),
+    })
+}
+
+/// Port of `collect_bead_data`'s post-per-store processing in
+/// `webui/server.py`. Returned alongside the raw store snapshots gathered by
+/// [`collect_bead_store_summaries`] so the two halves can evolve independently.
+#[derive(Debug, Clone, Default)]
+pub struct BeadData {
+    /// Compacted graph nodes, one per non-merge, non-noise issue. Each node
+    /// carries `kind = "task"`, its owning store scope, and the list of
+    /// agent targets attached to it via hook. `linked_commits` /
+    /// `linked_commit_count` are layered on later in `finalize_graph`.
+    pub nodes: Vec<Value>,
+    /// Dependency edges between graph nodes. `kind` is `"parent"` for
+    /// parent-child beads and `"dependency"` for everything else.
+    pub edges: Vec<Value>,
+    /// Sorted union of bead ids surfaced by `bd blocked` across all stores.
+    pub blocked_ids: Vec<String>,
+    /// Sorted union of bead ids attached to an agent hook (both the inbound
+    /// `hook_by_issue` map and per-store `bd list --status=hooked`).
+    pub hooked_ids: Vec<String>,
+    /// Merge-request beads translated into a flat `{task_id, commit_sha, …}`
+    /// list. Consumed downstream by `collect_git_memory` in gui-cqe.7.
+    pub merge_links: Vec<Value>,
+    /// Derived `ui_status` counters over non-system task nodes, plus a
+    /// `system_running` tally for system tasks. Matches the `summary` dict
+    /// Python returns from `collect_bead_data`.
+    pub summary: BTreeMap<String, u64>,
+}
+
+/// Rust port of `collect_bead_data` in `webui/server.py`. The per-store `bd`
+/// subprocess fan-out is handled by [`collect_bead_store_summaries`] so the
+/// caller can reuse the same raw snapshots without paying for a second
+/// round of subprocess calls.
+///
+/// Inputs:
+/// - `store_snapshots` — raw `bd` payloads per store (issues, blocked,
+///   hooked) produced by [`collect_bead_store_summaries`].
+/// - `hook_by_issue` — inverted index mapping bead id → list of agent
+///   targets currently hooked on it, produced by `collect_agents`.
+pub fn collect_bead_data(
+    store_snapshots: &[BeadStoreSnapshot],
+    hook_by_issue: &HashMap<String, Vec<String>>,
+) -> BeadData {
+    let mut issue_order: Vec<String> = Vec::new();
+    let mut issue_scope: HashMap<String, String> = HashMap::new();
+    let mut issue_by_id: HashMap<String, Value> = HashMap::new();
+    let mut blocked_ids: HashSet<String> = HashSet::new();
+    let mut hooked_ids: HashSet<String> = hook_by_issue.keys().cloned().collect();
+    let mut merge_links: Vec<Value> = Vec::new();
+
+    for snapshot in store_snapshots {
+        let scope = snapshot.store.scope.clone();
+        let store_name = snapshot.store.name.clone();
+
+        for item in &snapshot.blocked {
+            if let Some(id) = item.get("id").and_then(Value::as_str) {
+                if !id.is_empty() {
+                    blocked_ids.insert(id.to_string());
+                }
+            }
+        }
+        for item in &snapshot.hooked {
+            if let Some(id) = item.get("id").and_then(Value::as_str) {
+                if !id.is_empty() {
+                    hooked_ids.insert(id.to_string());
+                }
+            }
+        }
+
+        for issue in &snapshot.issues {
+            let Some(id_ref) = issue.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if id_ref.is_empty() {
+                continue;
+            }
+            let id = id_ref.to_string();
+
+            // Extract merge metadata before we potentially overwrite the
+            // issue in the dedup map — merge beads can exist in multiple
+            // stores but we want to emit a link per (issue, store).
+            if issue_is_merge(issue) {
+                let description = issue
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let meta = parse_simple_metadata_block(description);
+                if let (Some(source_issue), Some(commit_sha)) =
+                    (meta.get("source_issue"), meta.get("commit_sha"))
+                {
+                    if !source_issue.is_empty() && !commit_sha.is_empty() {
+                        let short_sha: String = commit_sha.chars().take(7).collect();
+                        merge_links.push(json!({
+                            "task_id": source_issue,
+                            "merge_issue_id": id,
+                            "commit_sha": commit_sha,
+                            "short_sha": short_sha,
+                            "branch": meta.get("branch").cloned().unwrap_or_default(),
+                            "target": meta.get("target").cloned().unwrap_or_default(),
+                            "worker": meta.get("worker").cloned().unwrap_or_default(),
+                            "store": store_name,
+                            "scope": scope,
+                            "title": issue.get("title").and_then(Value::as_str).unwrap_or(""),
+                        }));
+                    }
+                }
+            }
+
+            // Python's `all_issues[issue_id] = issue` semantics: later stores
+            // overwrite the bead. We preserve insertion order from the first
+            // time the id was seen so the graph is deterministic.
+            if !issue_by_id.contains_key(&id) {
+                issue_order.push(id.clone());
+            }
+            issue_by_id.insert(id.clone(), issue.clone());
+            issue_scope.insert(id, scope.clone());
+        }
+    }
+
+    let mut nodes: Vec<Value> = Vec::new();
+    let mut summary: BTreeMap<String, u64> = BTreeMap::new();
+    for key in ["ready", "running", "stuck", "done", "ice", "system_running"] {
+        summary.insert(key.into(), 0);
+    }
+
+    for id in &issue_order {
+        let Some(issue) = issue_by_id.get(id) else {
+            continue;
+        };
+        if issue_is_merge(issue) || issue_is_graph_noise(issue) {
+            continue;
+        }
+        let mut node = compact_issue(issue, &blocked_ids, &hooked_ids);
+        let scope = issue_scope.get(id).cloned().unwrap_or_default();
+        let agent_targets: Vec<Value> = hook_by_issue
+            .get(id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(Value::String)
+            .collect();
+        if let Some(obj) = node.as_object_mut() {
+            obj.insert("kind".into(), Value::String("task".into()));
+            obj.insert("scope".into(), Value::String(scope));
+            obj.insert("agent_targets".into(), Value::Array(agent_targets));
+        }
+        let is_system = node
+            .get("is_system")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let ui_status = node
+            .get("ui_status")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if is_system {
+            if ui_status == "running" {
+                *summary.entry("system_running".into()).or_insert(0) += 1;
+            }
+        } else {
+            *summary.entry(ui_status).or_insert(0) += 1;
+        }
+        nodes.push(node);
+    }
+
+    let node_ids: HashSet<String> = nodes
+        .iter()
+        .filter_map(|n| n.get("id").and_then(Value::as_str).map(String::from))
+        .collect();
+
+    let mut edges: Vec<Value> = Vec::new();
+    let mut edge_keys: HashSet<(String, String, String)> = HashSet::new();
+    for id in &issue_order {
+        if !node_ids.contains(id) {
+            continue;
+        }
+        let Some(issue) = issue_by_id.get(id) else {
+            continue;
+        };
+        let Some(deps) = issue.get("dependencies").and_then(Value::as_array) else {
+            continue;
+        };
+        for dep in deps {
+            let source = dep
+                .get("depends_on_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if source.is_empty() || !node_ids.contains(&source) {
+                continue;
+            }
+            let edge_kind = if dep.get("type").and_then(Value::as_str) == Some("parent-child") {
+                "parent"
+            } else {
+                "dependency"
+            };
+            let key = (source.clone(), id.clone(), edge_kind.to_string());
+            if !edge_keys.insert(key) {
+                continue;
+            }
+            edges.push(json!({
+                "source": source,
+                "target": id,
+                "kind": edge_kind,
+            }));
+        }
+    }
+
+    let mut blocked_sorted: Vec<String> = blocked_ids.into_iter().collect();
+    blocked_sorted.sort();
+    let mut hooked_sorted: Vec<String> = hooked_ids.into_iter().collect();
+    hooked_sorted.sort();
+
+    BeadData {
+        nodes,
+        edges,
+        blocked_ids: blocked_sorted,
+        hooked_ids: hooked_sorted,
+        merge_links,
+        summary,
+    }
 }
 
 /// Port of `collect_polecats` in `webui/server.py`. Invokes
@@ -2596,5 +3027,375 @@ mod tests {
         // Raw snapshot is always emitted so downstream collectors can reuse it.
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].store.name, "hq");
+    }
+
+    fn bead_snapshot(
+        name: &str,
+        scope: &str,
+        issues: Vec<Value>,
+        blocked: Vec<Value>,
+        hooked: Vec<Value>,
+    ) -> BeadStoreSnapshot {
+        BeadStoreSnapshot {
+            store: BeadStore {
+                name: name.into(),
+                path: PathBuf::from(format!("/tmp/{name}")),
+                scope: scope.into(),
+            },
+            status_payload: None,
+            issues,
+            blocked,
+            hooked,
+            status_ok: true,
+            status_error: String::new(),
+        }
+    }
+
+    #[test]
+    fn parse_simple_metadata_block_extracts_key_value_lines() {
+        let meta = parse_simple_metadata_block(
+            "source_issue: gt-123\ncommit_sha: deadbeef\n\nignored body",
+        );
+        assert_eq!(meta.get("source_issue").map(String::as_str), Some("gt-123"));
+        assert_eq!(meta.get("commit_sha").map(String::as_str), Some("deadbeef"));
+    }
+
+    #[test]
+    fn parse_simple_metadata_block_stops_after_twenty_lines() {
+        // 20 filler lines + 1 real key on line 21 — must not be picked up.
+        let mut text = String::new();
+        for _ in 0..20 {
+            text.push_str("noise\n");
+        }
+        text.push_str("after_cap: value\n");
+        let meta = parse_simple_metadata_block(&text);
+        assert!(!meta.contains_key("after_cap"));
+    }
+
+    #[test]
+    fn issue_is_merge_honours_label_or_metadata_block() {
+        let by_label = json!({
+            "id": "gt-1",
+            "labels": ["gt:merge-request"],
+            "description": "",
+        });
+        assert!(issue_is_merge(&by_label));
+
+        let by_meta = json!({
+            "id": "gt-2",
+            "labels": [],
+            "description": "source_issue: gt-task\ncommit_sha: abc123\n",
+        });
+        assert!(issue_is_merge(&by_meta));
+
+        let neither = json!({"id": "gt-3", "labels": [], "description": "hello"});
+        assert!(!issue_is_merge(&neither));
+    }
+
+    #[test]
+    fn issue_is_system_matches_labels_types_ids_and_titles() {
+        assert!(issue_is_system(&json!({"labels": ["gt:rig"]})));
+        assert!(issue_is_system(&json!({"issue_type": "molecule"})));
+        assert!(issue_is_system(&json!({"id": "hq-wisp-abc"})));
+        assert!(issue_is_system(&json!({"title": "mol-polecat-work"})));
+        assert!(!issue_is_system(&json!({"id": "gt-1", "title": "Port X"})));
+    }
+
+    #[test]
+    fn issue_is_graph_noise_filters_non_allowed_types_and_labels() {
+        // Random issue_type with no system marker → noise.
+        assert!(issue_is_graph_noise(
+            &json!({"issue_type": "mail", "labels": []})
+        ));
+        // gt:message label → noise even if type is allowed.
+        assert!(issue_is_graph_noise(&json!({
+            "issue_type": "task",
+            "labels": ["gt:message"]
+        })));
+        // hq-cv-* convoy beads are excluded.
+        assert!(issue_is_graph_noise(
+            &json!({"id": "hq-cv-99", "issue_type": "task"})
+        ));
+        // Allowed type without noisy labels → kept.
+        assert!(!issue_is_graph_noise(
+            &json!({"id": "gt-1", "issue_type": "task", "labels": []})
+        ));
+        // Molecule (system) with weird type → kept because system overrides.
+        assert!(!issue_is_graph_noise(&json!({
+            "id": "hq-wisp-x",
+            "issue_type": "molecule",
+        })));
+    }
+
+    #[test]
+    fn derive_ui_status_covers_all_branches() {
+        let blocked: HashSet<String> = ["b1".into()].into_iter().collect();
+        let hooked: HashSet<String> = ["h1".into()].into_iter().collect();
+
+        assert_eq!(
+            derive_ui_status(&json!({"id": "a", "status": "closed"}), &blocked, &hooked),
+            "done"
+        );
+        assert_eq!(
+            derive_ui_status(&json!({"id": "a", "status": "hooked"}), &blocked, &hooked),
+            "running"
+        );
+        assert_eq!(
+            derive_ui_status(&json!({"id": "h1", "status": "open"}), &blocked, &hooked),
+            "running"
+        );
+        assert_eq!(
+            derive_ui_status(&json!({"id": "a", "status": "deferred"}), &blocked, &hooked),
+            "ice"
+        );
+        assert_eq!(
+            derive_ui_status(&json!({"id": "b1", "status": "open"}), &blocked, &hooked),
+            "stuck"
+        );
+        assert_eq!(
+            derive_ui_status(&json!({"id": "other", "status": "open"}), &blocked, &hooked),
+            "ready"
+        );
+    }
+
+    #[test]
+    fn collect_bead_data_compacts_issues_and_derives_summary() {
+        let issues = vec![
+            json!({
+                "id": "gt-1",
+                "title": "Running task",
+                "status": "in_progress",
+                "issue_type": "task",
+                "labels": [],
+                "dependencies": [],
+            }),
+            json!({
+                "id": "gt-2",
+                "title": "Blocked task",
+                "status": "open",
+                "issue_type": "task",
+                "labels": [],
+                "dependencies": [
+                    {"depends_on_id": "gt-1", "type": "dependency"}
+                ],
+            }),
+            json!({
+                "id": "gt-3",
+                "title": "Frozen",
+                "status": "deferred",
+                "issue_type": "task",
+                "labels": [],
+                "dependencies": [],
+            }),
+            json!({
+                "id": "gt-4",
+                "title": "Done",
+                "status": "closed",
+                "issue_type": "task",
+                "labels": [],
+                "dependencies": [],
+            }),
+            json!({
+                "id": "gt-5",
+                "title": "Ignored mail",
+                "status": "open",
+                "issue_type": "task",
+                "labels": ["gt:message"],
+                "dependencies": [],
+            }),
+            json!({
+                "id": "hq-wisp-x",
+                "title": "Running molecule",
+                "status": "hooked",
+                "issue_type": "molecule",
+                "labels": [],
+                "dependencies": [],
+            }),
+            json!({
+                "id": "gt-merge-1",
+                "title": "Merge: gt-1 -> main",
+                "status": "closed",
+                "issue_type": "task",
+                "labels": ["gt:merge-request"],
+                "description": "source_issue: gt-1\ncommit_sha: abcdef0123456\nbranch: feature/x\ntarget: main\nworker: polecat\n",
+                "dependencies": [],
+            }),
+        ];
+        let blocked = vec![json!({"id": "gt-2"})];
+        let hooked = vec![json!({"id": "gt-1"})];
+
+        let snap = bead_snapshot("hq", "hq", issues, blocked, hooked);
+        let mut hook_by_issue: HashMap<String, Vec<String>> = HashMap::new();
+        hook_by_issue.insert("gt-1".into(), vec!["gtui/polecats/nux".into()]);
+        let bead = collect_bead_data(&[snap], &hook_by_issue);
+
+        let node_ids: Vec<String> = bead
+            .nodes
+            .iter()
+            .filter_map(|n| n.get("id").and_then(Value::as_str).map(String::from))
+            .collect();
+        // Merge issue and gt:message issue are filtered out; molecule kept as
+        // system task; gt-1..gt-4 all kept.
+        assert!(node_ids.contains(&"gt-1".to_string()));
+        assert!(node_ids.contains(&"gt-2".to_string()));
+        assert!(node_ids.contains(&"gt-3".to_string()));
+        assert!(node_ids.contains(&"gt-4".to_string()));
+        assert!(node_ids.contains(&"hq-wisp-x".to_string()));
+        assert!(!node_ids.contains(&"gt-merge-1".to_string()));
+        assert!(!node_ids.contains(&"gt-5".to_string()));
+
+        // Compacted node carries kind, scope, agent_targets.
+        let gt1 = bead
+            .nodes
+            .iter()
+            .find(|n| n.get("id").and_then(Value::as_str) == Some("gt-1"))
+            .expect("gt-1 node");
+        assert_eq!(gt1["kind"], "task");
+        assert_eq!(gt1["scope"], "hq");
+        assert_eq!(gt1["ui_status"], "running");
+        assert_eq!(gt1["agent_targets"][0], "gtui/polecats/nux");
+        assert_eq!(gt1["is_system"], false);
+
+        // Blocked dep sets ui_status to stuck even though status=open.
+        let gt2 = bead
+            .nodes
+            .iter()
+            .find(|n| n.get("id").and_then(Value::as_str) == Some("gt-2"))
+            .expect("gt-2 node");
+        assert_eq!(gt2["ui_status"], "stuck");
+
+        // Single edge for gt-1 -> gt-2 dependency.
+        assert_eq!(bead.edges.len(), 1);
+        assert_eq!(bead.edges[0]["source"], "gt-1");
+        assert_eq!(bead.edges[0]["target"], "gt-2");
+        assert_eq!(bead.edges[0]["kind"], "dependency");
+
+        // Summary counters.
+        assert_eq!(bead.summary.get("running"), Some(&1));
+        assert_eq!(bead.summary.get("stuck"), Some(&1));
+        assert_eq!(bead.summary.get("ice"), Some(&1));
+        assert_eq!(bead.summary.get("done"), Some(&1));
+        assert_eq!(bead.summary.get("ready"), Some(&0));
+        assert_eq!(bead.summary.get("system_running"), Some(&1));
+
+        // Merge links derived from the merge-request bead.
+        assert_eq!(bead.merge_links.len(), 1);
+        let link = &bead.merge_links[0];
+        assert_eq!(link["task_id"], "gt-1");
+        assert_eq!(link["merge_issue_id"], "gt-merge-1");
+        assert_eq!(link["commit_sha"], "abcdef0123456");
+        assert_eq!(link["short_sha"], "abcdef0");
+        assert_eq!(link["branch"], "feature/x");
+        assert_eq!(link["target"], "main");
+        assert_eq!(link["store"], "hq");
+        assert_eq!(link["scope"], "hq");
+
+        // Blocked/hooked id sets are sorted unions.
+        assert_eq!(bead.blocked_ids, vec!["gt-2".to_string()]);
+        assert!(bead.hooked_ids.contains(&"gt-1".to_string()));
+    }
+
+    #[test]
+    fn collect_bead_data_dedupes_across_stores_and_preserves_first_scope() {
+        // Same id appears in both stores; Python's last-write-wins on the
+        // issue body, but we keep the insertion order so the graph stays
+        // deterministic. Scope tracks the last store's scope.
+        let store_a = bead_snapshot(
+            "hq",
+            "hq",
+            vec![json!({
+                "id": "gt-1",
+                "title": "First",
+                "status": "open",
+                "issue_type": "task",
+                "labels": [],
+                "dependencies": [],
+            })],
+            Vec::new(),
+            Vec::new(),
+        );
+        let store_b = bead_snapshot(
+            "gtui",
+            "gtui",
+            vec![json!({
+                "id": "gt-1",
+                "title": "Second",
+                "status": "open",
+                "issue_type": "task",
+                "labels": [],
+                "dependencies": [],
+            })],
+            Vec::new(),
+            Vec::new(),
+        );
+        let bead = collect_bead_data(&[store_a, store_b], &HashMap::new());
+        assert_eq!(bead.nodes.len(), 1);
+        let node = &bead.nodes[0];
+        assert_eq!(node["title"], "Second");
+        assert_eq!(node["scope"], "gtui");
+    }
+
+    #[test]
+    fn collect_bead_data_drops_edges_to_nodes_outside_graph() {
+        // gt-1 depends on gt-noise (filtered out as non-allowed type) — the
+        // edge must not be emitted because the source never made it into
+        // `nodes`.
+        let issues = vec![
+            json!({
+                "id": "gt-1",
+                "title": "Keeper",
+                "status": "open",
+                "issue_type": "task",
+                "labels": [],
+                "dependencies": [
+                    {"depends_on_id": "gt-noise", "type": "dependency"}
+                ],
+            }),
+            json!({
+                "id": "gt-noise",
+                "title": "Mail",
+                "status": "open",
+                "issue_type": "mail",
+                "labels": [],
+                "dependencies": [],
+            }),
+        ];
+        let snap = bead_snapshot("hq", "hq", issues, Vec::new(), Vec::new());
+        let bead = collect_bead_data(&[snap], &HashMap::new());
+        let ids: Vec<_> = bead
+            .nodes
+            .iter()
+            .filter_map(|n| n.get("id").and_then(Value::as_str))
+            .collect();
+        assert_eq!(ids, vec!["gt-1"]);
+        assert!(bead.edges.is_empty());
+    }
+
+    #[test]
+    fn collect_bead_data_marks_parent_child_dependency_kind() {
+        let issues = vec![
+            json!({
+                "id": "parent",
+                "title": "P",
+                "status": "open",
+                "issue_type": "epic",
+                "labels": [],
+                "dependencies": [],
+            }),
+            json!({
+                "id": "child",
+                "title": "C",
+                "status": "open",
+                "issue_type": "task",
+                "labels": [],
+                "dependencies": [
+                    {"depends_on_id": "parent", "type": "parent-child"}
+                ],
+            }),
+        ];
+        let snap = bead_snapshot("hq", "hq", issues, Vec::new(), Vec::new());
+        let bead = collect_bead_data(&[snap], &HashMap::new());
+        assert_eq!(bead.edges.len(), 1);
+        assert_eq!(bead.edges[0]["kind"], "parent");
     }
 }
