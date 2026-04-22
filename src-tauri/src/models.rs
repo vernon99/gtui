@@ -127,6 +127,10 @@ pub struct AgentInfo {
     #[serde(default)]
     pub events: Vec<Value>,
     #[serde(default)]
+    pub task_events: Vec<Value>,
+    #[serde(default)]
+    pub recent_task: Value,
+    #[serde(default)]
     pub crew: Value,
     #[serde(default)]
     pub polecat: Value,
