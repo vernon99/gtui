@@ -1075,33 +1075,51 @@ fn action_output(result: &crate::command::CommandResult) -> String {
 pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> WorkspaceSnapshot {
     let started = Instant::now();
 
-    let (status_result, vitals_result, crew_list_result, crew_status_result, feed_result) = tokio::join!(
-        run_command(&["gt", "status", "--fast"], gt_root, RunOptions::default(),),
-        run_command(&["gt", "vitals"], gt_root, RunOptions::default()),
-        run_command(
-            &["gt", "crew", "list", "--all", "--json"],
-            gt_root,
-            RunOptions::default().parse_json(),
-        ),
-        run_command(
-            &["gt", "crew", "status", "--json"],
-            gt_root,
-            RunOptions::default().parse_json(),
-        ),
-        run_command(
-            &[
-                "gt",
-                "feed",
-                "--plain",
-                "--since",
-                "20m",
-                "--limit",
-                "80",
-                "--no-follow",
-            ],
-            gt_root,
-            RunOptions::default(),
-        ),
+    // Three independent top-level phases run in parallel:
+    //   - the 5 gt subprocesses that feed status/crews/feed
+    //   - per-store `bd` fan-out (discovered synchronously from disk)
+    //   - convoy list
+    // Agents, bead folding, and git memory run after because they consume
+    // outputs from these three branches.
+    let bead_stores = discover_bead_stores(gt_root);
+    let gt_commands_future = async {
+        tokio::join!(
+            run_command(&["gt", "status", "--fast"], gt_root, RunOptions::default(),),
+            run_command(&["gt", "vitals"], gt_root, RunOptions::default()),
+            run_command(
+                &["gt", "crew", "list", "--all", "--json"],
+                gt_root,
+                RunOptions::default().parse_json(),
+            ),
+            run_command(
+                &["gt", "crew", "status", "--json"],
+                gt_root,
+                RunOptions::default().parse_json(),
+            ),
+            run_command(
+                &[
+                    "gt",
+                    "feed",
+                    "--plain",
+                    "--since",
+                    "20m",
+                    "--limit",
+                    "80",
+                    "--no-follow",
+                ],
+                gt_root,
+                RunOptions::default(),
+            ),
+        )
+    };
+    let (
+        (status_result, vitals_result, crew_list_result, crew_status_result, feed_result),
+        (store_summaries, bead_store_snapshots, store_errors, bead_ms),
+        (convoys, convoy_errors, convoy_ms),
+    ) = tokio::join!(
+        gt_commands_future,
+        collect_bead_store_summaries(&bead_stores),
+        collect_convoy_data(gt_root),
     );
 
     let mut errors: Vec<Value> = Vec::new();
@@ -1170,15 +1188,12 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
         Vec::new()
     };
 
+    errors.extend(store_errors);
+    errors.extend(convoy_errors);
+
     let (agents, hook_by_issue, agent_errors, agent_ms) =
         collect_agents(gt_root, &status_summary, &crews, &feed_events).await;
     errors.extend(agent_errors);
-
-    // Discover bead stores (hq + per-rig) and collect the per-store summary.
-    let bead_stores = discover_bead_stores(gt_root);
-    let (store_summaries, bead_store_snapshots, store_errors, bead_ms) =
-        collect_bead_store_summaries(&bead_stores).await;
-    errors.extend(store_errors);
 
     // Fold the raw per-store snapshots into compacted graph nodes/edges,
     // merge links, and the consolidated blocked/hooked sets.
@@ -1192,9 +1207,6 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
     let (git_memory, git_errors, git_ms) =
         collect_git_memory(gt_root, &crews, &bead_data.merge_links).await;
     errors.extend(git_errors);
-
-    let (convoys, convoy_errors, convoy_ms) = collect_convoy_data(gt_root).await;
-    errors.extend(convoy_errors);
 
     // Layer linked commits, commit nodes/edges, and the "interesting" filter
     // onto the raw bead graph. Mirrors `finalize_graph` in `webui/server.py`.
@@ -3364,8 +3376,15 @@ async fn collect_agents(
     // Stable target ordering keeps behavior deterministic across runs.
     let mut agents_by_target: BTreeMap<String, AgentInfo> = BTreeMap::new();
 
-    let (tmux_agents, tmux_errors, tmux_ms) =
-        collect_tmux_agents(gt_root, &status_summary.tmux_socket).await;
+    // `tmux list-panes` and `gt polecat list` are independent and both hit
+    // subprocesses, so they run concurrently. Crew enrichment slots in between
+    // — it's sync and small, so ordering-wise it doesn't matter where it sits,
+    // but placing it after the join keeps the merge order (tmux → crews →
+    // polecats) identical to the sequential version.
+    let ((tmux_agents, tmux_errors, tmux_ms), (polecats, polecat_errors, polecat_ms)) = tokio::join!(
+        collect_tmux_agents(gt_root, &status_summary.tmux_socket),
+        collect_polecats(gt_root),
+    );
     errors.extend(tmux_errors);
     duration_ms += tmux_ms;
     for agent in tmux_agents {
@@ -3403,7 +3422,6 @@ async fn collect_agents(
         agents_by_target.insert(target, existing);
     }
 
-    let (polecats, polecat_errors, polecat_ms) = collect_polecats(gt_root).await;
     errors.extend(polecat_errors);
     duration_ms += polecat_ms;
     for polecat in polecats {
