@@ -8,7 +8,7 @@
 //! stubbed here — they're tracked as follow-on beads. Everything the store
 //! *does* own — locks, polling loop, action ring buffer, caches — is in place.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -1013,9 +1013,15 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
     // Fold the raw per-store snapshots into compacted graph nodes/edges,
     // merge links, and the consolidated blocked/hooked sets.
     let bead_data = collect_bead_data(&bead_store_snapshots, &hook_by_issue);
-    let _ = &bead_data.merge_links; // Consumed by collect_git_memory in gui-cqe.7.
     let _ = &bead_data.blocked_ids; // Exposed on future IPC surfaces.
     let _ = &bead_data.hooked_ids;
+
+    // Git memory: walk the town root + crew worktrees, fan out the four git
+    // commands per repo, and fold commit history + merge beads into a per-task
+    // memory index.
+    let (git_memory, git_errors, git_ms) =
+        collect_git_memory(gt_root, &crews, &bead_data.merge_links).await;
+    errors.extend(git_errors);
 
     let mut running_tasks: u32 = 0;
     let mut stuck_tasks: u32 = 0;
@@ -1061,18 +1067,15 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
     derived_status_counts.insert("done".into(), done_tasks);
     derived_status_counts.insert("ice".into(), ice_tasks);
 
-    // Downstream collectors are still stubbed — git memory and convoy data
-    // come online in later beads and `finalize_graph` layers linked commits
-    // onto the nodes below.
+    // Downstream collectors are still stubbed — convoy data comes online in
+    // a later bead and `finalize_graph` layers linked commits onto the nodes
+    // below.
     let graph = json!({
         "nodes": bead_data.nodes.clone(),
         "edges": bead_data.edges.clone(),
     });
-    let git = json!({
-        "repos": Vec::<Value>::new(),
-        "recent_commits": Vec::<Value>::new(),
-        "task_memory": {},
-    });
+    let repo_count = git_memory.repos.len() as u32;
+    let git = git_memory.into_json();
     let convoys = json!({
         "convoys": Vec::<Value>::new(),
         "task_index": {},
@@ -1096,6 +1099,7 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
         done_tasks,
         system_running,
         active_agents,
+        repos: repo_count,
         command_errors: errors.len() as u32,
         stored_status_counts,
         derived_status_counts,
@@ -1130,6 +1134,7 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
             gt_commands_ms,
             agent_commands_ms: agent_ms,
             bd_commands_ms: bead_ms,
+            git_commands_ms: git_ms,
             ..Timings::default()
         },
     }
@@ -1928,6 +1933,548 @@ pub fn collect_bead_data(
         merge_links,
         summary,
     }
+}
+
+/// CRC-32-IEEE (same polynomial as `zlib.crc32`). Used only to derive stable,
+/// short repo identifiers from their filesystem root — the hash is not
+/// cryptographic and is just a compact substitute for the full path in JSON
+/// payloads that travel to the frontend.
+fn crc32_ieee(bytes: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &byte in bytes {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xEDB8_8320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    !crc
+}
+
+/// Stable short id for a repo rooted at `root`. Port of `make_repo_id` in
+/// `webui/server.py`; keeps the exact `repo-<hex>` shape so cached repo ids
+/// persisted in the frontend remain valid across the Python → Rust switch.
+fn make_repo_id(root: &str) -> String {
+    format!("repo-{:x}", crc32_ieee(root.as_bytes()))
+}
+
+fn issue_id_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:hq|[a-z]{2,})-[a-z0-9]+(?:\.[a-z0-9]+)*\b").expect("static regex")
+    })
+}
+
+/// Extract every bead id mentioned in `text`, deduplicated and lexicographically
+/// sorted. Mirrors `find_issue_ids` in `webui/server.py`.
+fn find_issue_ids(text: &str) -> Vec<String> {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for m in issue_id_re().find_iter(text) {
+        seen.insert(m.as_str().to_string());
+    }
+    seen.into_iter().collect()
+}
+
+/// Parse the output of `git status --short --branch`. Mirrors
+/// `parse_git_status` in `webui/server.py`: the first `## ...` line carries the
+/// branch description, every non-blank remaining line counts toward modified
+/// vs. untracked based on the porcelain prefix.
+fn parse_git_status(text: &str) -> Value {
+    let lines: Vec<&str> = text.lines().collect();
+    let branch = match lines.first() {
+        Some(first) if first.starts_with("## ") => first[3..].to_string(),
+        _ => String::new(),
+    };
+    let mut modified: u64 = 0;
+    let mut untracked: u64 = 0;
+    for line in lines.iter().skip(1) {
+        if line.starts_with("??") {
+            untracked += 1;
+        } else if !line.trim().is_empty() {
+            modified += 1;
+        }
+    }
+    json!({
+        "branch": branch,
+        "modified": modified,
+        "untracked": untracked,
+        "dirty": modified > 0 || untracked > 0,
+        "raw": text,
+    })
+}
+
+/// Parse `git log` output emitted with the `%H%x1f%h%x1f%cI%x1f%D%x1f%s`
+/// format. Records with fewer than five unit-separator fields are skipped so a
+/// truncated line from a git error can't crash the parse. Port of
+/// `parse_git_log` in `webui/server.py`.
+fn parse_git_log(text: &str, repo_id: &str, repo_label: &str) -> Vec<Value> {
+    let mut commits: Vec<Value> = Vec::new();
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split('\u{001f}').collect();
+        if parts.len() != 5 {
+            continue;
+        }
+        let sha = parts[0];
+        let short_sha = parts[1];
+        let committed_at = parts[2];
+        let refs = parts[3];
+        let subject = parts[4];
+        commits.push(json!({
+            "repo_id": repo_id,
+            "repo_label": repo_label,
+            "sha": sha,
+            "short_sha": short_sha,
+            "committed_at": committed_at,
+            "refs": refs,
+            "subject": subject,
+            "task_ids": find_issue_ids(subject),
+        }));
+    }
+    commits
+}
+
+/// Parse `git branch --format=...` output. Port of `parse_git_branches`.
+/// The format string (`%(HEAD)%x1f%(refname:short)%x1f%(objectname:short)%x1f%(committerdate:iso8601-strict)%x1f%(subject)`)
+/// is owned by `collect_git_memory`; keep the two in lockstep.
+fn parse_git_branches(text: &str) -> Vec<Value> {
+    let mut branches: Vec<Value> = Vec::new();
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split('\u{001f}').collect();
+        if parts.len() != 5 {
+            continue;
+        }
+        let head_flag = parts[0];
+        let name = parts[1];
+        let short_sha = parts[2];
+        let committed_at = parts[3];
+        let subject = parts[4];
+        branches.push(json!({
+            "current": head_flag == "*",
+            "name": name,
+            "short_sha": short_sha,
+            "committed_at": committed_at,
+            "subject": subject,
+        }));
+    }
+    branches
+}
+
+/// Parse `git worktree list --porcelain` output. Entries are blank-line
+/// separated; each entry is a set of `key value` lines. Port of
+/// `parse_worktrees` — normalises the fields the UI actually cares about
+/// (`path`, `head`, `branch`) and strips `refs/heads/` from branch names.
+fn parse_worktrees(text: &str) -> Vec<Value> {
+    let mut records: Vec<HashMap<String, String>> = Vec::new();
+    let mut current: HashMap<String, String> = HashMap::new();
+    for line in text.lines() {
+        if line.is_empty() {
+            if !current.is_empty() {
+                records.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        let (key, value) = match line.find(' ') {
+            Some(idx) => (&line[..idx], &line[idx + 1..]),
+            None => (line, ""),
+        };
+        current.insert(key.to_string(), value.to_string());
+    }
+    if !current.is_empty() {
+        records.push(current);
+    }
+
+    records
+        .into_iter()
+        .map(|item| {
+            let path = item.get("worktree").cloned().unwrap_or_default();
+            let head = item.get("HEAD").cloned().unwrap_or_default();
+            let branch = item
+                .get("branch")
+                .map(|b| b.strip_prefix("refs/heads/").unwrap_or(b).to_string())
+                .unwrap_or_default();
+            json!({
+                "path": path,
+                "head": head,
+                "branch": branch,
+            })
+        })
+        .collect()
+}
+
+/// Port of `collect_git_memory` in `webui/server.py`. Returned structure mirrors
+/// the Python dict 1:1 so the frontend and downstream collectors (`finalize_graph`,
+/// future activity grouping) can consume it verbatim.
+#[derive(Debug, Clone, Default)]
+pub struct GitMemory {
+    /// One entry per unique git toplevel discovered across the town root and
+    /// crew paths. Fields: `id`, `label`, `root`, `scope`, `scopes`, `status`,
+    /// `recent_commits`, `branches` (capped at 12), `worktrees`.
+    pub repos: Vec<Value>,
+    /// The 20 most recent commits across all repos, sorted by `committed_at`
+    /// descending.
+    pub recent_commits: Vec<Value>,
+    /// `task_id -> [memory entries]` — each entry is either a
+    /// `source: "commit-message"` record (commit in a local repo that
+    /// mentioned the task id in its subject) or a `source: "merge-bead"`
+    /// record (merge bead in the beads store referencing the task). Entries
+    /// per task are sorted by `(committed_at, short_sha)` descending.
+    pub task_memory: BTreeMap<String, Vec<Value>>,
+    /// Sorted union of `repo.id` for every repo in `repos`. Consumed by the
+    /// frontend to decide which repos to render in the repos panel.
+    pub repo_ids: Vec<String>,
+}
+
+impl GitMemory {
+    /// Render the git memory as a `serde_json::Value` matching the Python
+    /// shape.
+    pub fn into_json(self) -> Value {
+        let task_memory: serde_json::Map<String, Value> = self
+            .task_memory
+            .into_iter()
+            .map(|(k, v)| (k, Value::Array(v)))
+            .collect();
+        json!({
+            "repos": self.repos,
+            "recent_commits": self.recent_commits,
+            "task_memory": Value::Object(task_memory),
+            "repo_ids": self.repo_ids,
+        })
+    }
+}
+
+/// Rust port of `collect_git_memory` in `webui/server.py`. Discovers every git
+/// repo rooted at the town root or a crew path, fans out the four per-repo
+/// commands (`status`, `log`, `branch`, `worktree list`) in parallel via
+/// `tokio::join!`, and folds the commit history into a `task_id -> memory`
+/// index. Merge-request beads from `collect_bead_data` are stitched in so the
+/// UI can surface commits that have already landed but aren't in any local
+/// worktree.
+pub async fn collect_git_memory(
+    gt_root: &Path,
+    crews: &[Value],
+    merge_links: &[Value],
+) -> (GitMemory, Vec<Value>, u64) {
+    let mut errors: Vec<Value> = Vec::new();
+    let mut duration_ms: u64 = 0;
+
+    // Candidate paths to probe with `git rev-parse --show-toplevel`. The town
+    // root always contributes the `hq` scope; every crew adds its working
+    // directory with the rig scope. Empty paths are dropped so a crew row
+    // without a materialised worktree doesn't spam errors.
+    let mut candidates: Vec<(String, PathBuf, String)> = vec![(
+        "Town Root".to_string(),
+        gt_root.to_path_buf(),
+        "hq".to_string(),
+    )];
+    for crew in crews {
+        let path_str = crew.get("path").and_then(Value::as_str).unwrap_or("");
+        if path_str.is_empty() {
+            continue;
+        }
+        let rig = crew
+            .get("rig")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let name = crew
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        candidates.push((
+            format!("Crew {}/{}", rig, name),
+            PathBuf::from(path_str),
+            rig,
+        ));
+    }
+
+    struct RepoStub {
+        id: String,
+        root: String,
+        labels: Vec<String>,
+        scopes: Vec<String>,
+    }
+
+    let mut repo_order: Vec<String> = Vec::new();
+    let mut repo_stubs: HashMap<String, RepoStub> = HashMap::new();
+
+    for (label, path, scope) in candidates {
+        let path_str = path.to_string_lossy().into_owned();
+        let top = run_command(
+            &[
+                "git",
+                "-C",
+                path_str.as_str(),
+                "rev-parse",
+                "--show-toplevel",
+            ],
+            gt_root,
+            RunOptions::default(),
+        )
+        .await;
+        duration_ms += top.duration_ms;
+        if !top.ok {
+            errors.push(top.to_error());
+            continue;
+        }
+        let root = top
+            .data
+            .as_ref()
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if root.is_empty() {
+            continue;
+        }
+        if !repo_stubs.contains_key(&root) {
+            repo_order.push(root.clone());
+            repo_stubs.insert(
+                root.clone(),
+                RepoStub {
+                    id: make_repo_id(&root),
+                    root: root.clone(),
+                    labels: Vec::new(),
+                    scopes: Vec::new(),
+                },
+            );
+        }
+        let stub = repo_stubs.get_mut(&root).expect("just inserted");
+        if !stub.labels.contains(&label) {
+            stub.labels.push(label);
+        }
+        if !scope.is_empty() && !stub.scopes.contains(&scope) {
+            stub.scopes.push(scope);
+        }
+    }
+
+    let mut repos_out: Vec<Value> = Vec::with_capacity(repo_order.len());
+    let mut task_memory: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    let mut all_recent_commits: Vec<Value> = Vec::new();
+
+    for root in &repo_order {
+        let stub = match repo_stubs.get(root) {
+            Some(s) => s,
+            None => continue,
+        };
+        let repo_id = stub.id.clone();
+        let label = stub.labels.join(" / ");
+        let scopes = stub.scopes.clone();
+        let repo_scope = if scopes.len() == 1 {
+            scopes[0].clone()
+        } else {
+            String::new()
+        };
+
+        let status_args: [&str; 6] = ["git", "-C", root.as_str(), "status", "--short", "--branch"];
+        let log_args: [&str; 9] = [
+            "git",
+            "-C",
+            root.as_str(),
+            "log",
+            "--date=iso-strict",
+            "--decorate=short",
+            "--format=%H%x1f%h%x1f%cI%x1f%D%x1f%s",
+            "-n",
+            "16",
+        ];
+        let branch_args: [&str; 6] = [
+            "git",
+            "-C",
+            root.as_str(),
+            "branch",
+            "--format=%(HEAD)%x1f%(refname:short)%x1f%(objectname:short)%x1f%(committerdate:iso8601-strict)%x1f%(subject)",
+            "--sort=-committerdate",
+        ];
+        let worktree_args: [&str; 6] = [
+            "git",
+            "-C",
+            root.as_str(),
+            "worktree",
+            "list",
+            "--porcelain",
+        ];
+        let (status_result, log_result, branch_result, worktree_result) = tokio::join!(
+            run_command(&status_args, gt_root, RunOptions::default()),
+            run_command(&log_args, gt_root, RunOptions::default()),
+            run_command(&branch_args, gt_root, RunOptions::default()),
+            run_command(&worktree_args, gt_root, RunOptions::default()),
+        );
+        duration_ms += status_result.duration_ms
+            + log_result.duration_ms
+            + branch_result.duration_ms
+            + worktree_result.duration_ms;
+
+        for result in [
+            &status_result,
+            &log_result,
+            &branch_result,
+            &worktree_result,
+        ] {
+            if !result.ok {
+                errors.push(result.to_error());
+            }
+        }
+
+        let status = if status_result.ok {
+            parse_git_status(
+                status_result
+                    .data
+                    .as_ref()
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            )
+        } else {
+            json!({})
+        };
+        let recent_commits = if log_result.ok {
+            parse_git_log(
+                log_result
+                    .data
+                    .as_ref()
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+                &repo_id,
+                &label,
+            )
+        } else {
+            Vec::new()
+        };
+        let branches = if branch_result.ok {
+            parse_git_branches(
+                branch_result
+                    .data
+                    .as_ref()
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            )
+        } else {
+            Vec::new()
+        };
+        let worktrees = if worktree_result.ok {
+            parse_worktrees(
+                worktree_result
+                    .data
+                    .as_ref()
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            )
+        } else {
+            Vec::new()
+        };
+
+        let branches_top: Vec<Value> = branches.into_iter().take(12).collect();
+
+        repos_out.push(json!({
+            "id": repo_id.clone(),
+            "label": label.clone(),
+            "root": stub.root.clone(),
+            "scope": repo_scope.clone(),
+            "scopes": scopes,
+            "status": status,
+            "recent_commits": recent_commits.clone(),
+            "branches": branches_top,
+            "worktrees": worktrees,
+        }));
+        all_recent_commits.extend(recent_commits.iter().cloned());
+
+        for commit in &recent_commits {
+            let Some(task_ids) = commit.get("task_ids").and_then(Value::as_array) else {
+                continue;
+            };
+            for tid in task_ids {
+                let Some(task_id) = tid.as_str() else {
+                    continue;
+                };
+                if task_id.is_empty() {
+                    continue;
+                }
+                task_memory
+                    .entry(task_id.to_string())
+                    .or_default()
+                    .push(json!({
+                        "source": "commit-message",
+                        "repo_id": repo_id.clone(),
+                        "repo_label": label.clone(),
+                        "sha": commit.get("sha").cloned().unwrap_or(Value::String(String::new())),
+                        "short_sha": commit.get("short_sha").cloned().unwrap_or(Value::String(String::new())),
+                        "subject": commit.get("subject").cloned().unwrap_or(Value::String(String::new())),
+                        "committed_at": commit.get("committed_at").cloned().unwrap_or(Value::String(String::new())),
+                        "scope": repo_scope.clone(),
+                        "available_local": true,
+                    }));
+            }
+        }
+    }
+
+    for link in merge_links {
+        let Some(task_id) = link.get("task_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if task_id.is_empty() {
+            continue;
+        }
+        let entry = json!({
+            "source": "merge-bead",
+            "repo_id": "",
+            "repo_label": "",
+            "sha": link.get("commit_sha").cloned().unwrap_or(Value::String(String::new())),
+            "short_sha": link.get("short_sha").cloned().unwrap_or(Value::String(String::new())),
+            "subject": link.get("title").cloned().unwrap_or(Value::String(String::new())),
+            "committed_at": "",
+            "branch": link.get("branch").cloned().unwrap_or(Value::String(String::new())),
+            "target": link.get("target").cloned().unwrap_or(Value::String(String::new())),
+            "worker": link.get("worker").cloned().unwrap_or(Value::String(String::new())),
+            "merge_issue_id": link.get("merge_issue_id").cloned().unwrap_or(Value::String(String::new())),
+            "scope": link.get("scope").cloned().unwrap_or(Value::String(String::new())),
+            "available_local": false,
+        });
+        task_memory
+            .entry(task_id.to_string())
+            .or_default()
+            .push(entry);
+    }
+
+    all_recent_commits.sort_by(|a, b| {
+        let a_at = a.get("committed_at").and_then(Value::as_str).unwrap_or("");
+        let b_at = b.get("committed_at").and_then(Value::as_str).unwrap_or("");
+        b_at.cmp(a_at)
+    });
+    for entries in task_memory.values_mut() {
+        entries.sort_by(|a, b| {
+            let a_at = a.get("committed_at").and_then(Value::as_str).unwrap_or("");
+            let b_at = b.get("committed_at").and_then(Value::as_str).unwrap_or("");
+            let a_sha = a.get("short_sha").and_then(Value::as_str).unwrap_or("");
+            let b_sha = b.get("short_sha").and_then(Value::as_str).unwrap_or("");
+            (b_at, b_sha).cmp(&(a_at, a_sha))
+        });
+    }
+
+    let mut repo_ids: BTreeSet<String> = BTreeSet::new();
+    for repo in &repos_out {
+        if let Some(id) = repo.get("id").and_then(Value::as_str) {
+            if !id.is_empty() {
+                repo_ids.insert(id.to_string());
+            }
+        }
+    }
+    let repo_ids: Vec<String> = repo_ids.into_iter().collect();
+
+    let recent_commits = all_recent_commits.into_iter().take(20).collect();
+
+    (
+        GitMemory {
+            repos: repos_out,
+            recent_commits,
+            task_memory,
+            repo_ids,
+        },
+        errors,
+        duration_ms,
+    )
 }
 
 /// Port of `collect_polecats` in `webui/server.py`. Invokes
@@ -3397,5 +3944,133 @@ mod tests {
         let bead = collect_bead_data(&[snap], &HashMap::new());
         assert_eq!(bead.edges.len(), 1);
         assert_eq!(bead.edges[0]["kind"], "parent");
+    }
+
+    #[test]
+    fn make_repo_id_matches_python_zlib_crc32() {
+        // Expected values produced by Python:
+        // `hex(zlib.crc32(b"/home/user/gt") & 0xFFFFFFFF)` etc.
+        assert_eq!(make_repo_id(""), "repo-0");
+        assert_eq!(make_repo_id("hello"), "repo-3610a686");
+        assert_eq!(make_repo_id("/home/user/gt"), "repo-8974c2ca");
+    }
+
+    #[test]
+    fn find_issue_ids_returns_sorted_unique_matches() {
+        let subject = "fix: port git memory (gui-cqe.7) — refs hq-abc, hq-ABC, gui-cqe.7";
+        let ids = find_issue_ids(subject);
+        assert_eq!(ids, vec!["gui-cqe.7", "hq-ABC", "hq-abc"]);
+    }
+
+    #[test]
+    fn parse_git_status_extracts_branch_and_counts() {
+        let text = "## main...origin/main [ahead 1]\n M src/lib.rs\n?? new.txt\nA  added.rs\n";
+        let status = parse_git_status(text);
+        assert_eq!(status["branch"], "main...origin/main [ahead 1]");
+        assert_eq!(status["modified"], 2);
+        assert_eq!(status["untracked"], 1);
+        assert_eq!(status["dirty"], true);
+        assert_eq!(status["raw"], text);
+    }
+
+    #[test]
+    fn parse_git_status_clean_tree_is_not_dirty() {
+        let status = parse_git_status("## main\n");
+        assert_eq!(status["branch"], "main");
+        assert_eq!(status["modified"], 0);
+        assert_eq!(status["untracked"], 0);
+        assert_eq!(status["dirty"], false);
+    }
+
+    #[test]
+    fn parse_git_log_emits_one_entry_per_well_formed_line() {
+        let text = format!(
+            "{sha}\x1f{short}\x1f{when}\x1fHEAD -> main\x1ffix: port git memory (gui-cqe.7)\nmalformed line with no separators\n",
+            sha = "a".repeat(40),
+            short = "aaaaaaa",
+            when = "2026-04-22T08:01:00+00:00",
+        );
+        let commits = parse_git_log(&text, "repo-abc", "Town Root");
+        assert_eq!(commits.len(), 1);
+        let commit = &commits[0];
+        assert_eq!(commit["repo_id"], "repo-abc");
+        assert_eq!(commit["repo_label"], "Town Root");
+        assert_eq!(commit["short_sha"], "aaaaaaa");
+        assert_eq!(commit["refs"], "HEAD -> main");
+        assert_eq!(commit["subject"], "fix: port git memory (gui-cqe.7)");
+        assert_eq!(commit["task_ids"][0], "gui-cqe.7");
+    }
+
+    #[test]
+    fn parse_git_branches_marks_current_and_splits_fields() {
+        let text = "*\x1fmain\x1fabcdef0\x1f2026-04-22T08:00:00+00:00\x1fport git memory\n\x1ffeature/x\x1f1234567\x1f2026-04-20T10:00:00+00:00\x1fWIP feature\n";
+        let branches = parse_git_branches(text);
+        assert_eq!(branches.len(), 2);
+        assert_eq!(branches[0]["current"], true);
+        assert_eq!(branches[0]["name"], "main");
+        assert_eq!(branches[0]["short_sha"], "abcdef0");
+        assert_eq!(branches[1]["current"], false);
+        assert_eq!(branches[1]["name"], "feature/x");
+    }
+
+    #[test]
+    fn parse_worktrees_splits_porcelain_entries_and_strips_refs_heads() {
+        let text = "worktree /home/user/gt\nHEAD abcdef0123456789\nbranch refs/heads/main\n\nworktree /home/user/gt/gtui/polecats/furiosa/gtui\nHEAD 1234567\nbranch refs/heads/polecat/furiosa/gui-cqe.7\n";
+        let worktrees = parse_worktrees(text);
+        assert_eq!(worktrees.len(), 2);
+        assert_eq!(worktrees[0]["path"], "/home/user/gt");
+        assert_eq!(worktrees[0]["head"], "abcdef0123456789");
+        assert_eq!(worktrees[0]["branch"], "main");
+        assert_eq!(worktrees[1]["branch"], "polecat/furiosa/gui-cqe.7");
+    }
+
+    #[test]
+    fn parse_worktrees_handles_final_entry_without_trailing_blank_line() {
+        let text = "worktree /one\nHEAD aaa\nbranch refs/heads/main";
+        let worktrees = parse_worktrees(text);
+        assert_eq!(worktrees.len(), 1);
+        assert_eq!(worktrees[0]["path"], "/one");
+    }
+
+    #[tokio::test]
+    async fn collect_git_memory_folds_merge_links_into_task_memory() {
+        // No git commands succeed against the temp dir (it's not a repo), so
+        // the repos list stays empty — but the merge_links path should still
+        // populate task_memory with a `source: "merge-bead"` entry per link.
+        let merge_links = vec![json!({
+            "task_id": "gui-cqe.1",
+            "merge_issue_id": "gt-merge-1",
+            "commit_sha": "deadbeef0123456789",
+            "short_sha": "deadbee",
+            "branch": "polecat/furiosa/gui-cqe.1",
+            "target": "main",
+            "worker": "gtui/polecats/furiosa",
+            "title": "fix: port bead discovery (gui-cqe.1)",
+            "scope": "gtui",
+        })];
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (memory, _errors, _ms) = collect_git_memory(tmp.path(), &[], &merge_links).await;
+        let entries = memory
+            .task_memory
+            .get("gui-cqe.1")
+            .expect("merge-link task_memory entry");
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry["source"], "merge-bead");
+        assert_eq!(entry["short_sha"], "deadbee");
+        assert_eq!(entry["branch"], "polecat/furiosa/gui-cqe.1");
+        assert_eq!(entry["available_local"], false);
+        assert_eq!(entry["scope"], "gtui");
+    }
+
+    #[tokio::test]
+    async fn collect_git_memory_round_trips_through_into_json() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (memory, _errors, _ms) = collect_git_memory(tmp.path(), &[], &[]).await;
+        let value = memory.into_json();
+        assert!(value.get("repos").is_some());
+        assert!(value.get("recent_commits").is_some());
+        assert!(value.get("task_memory").is_some());
+        assert!(value.get("repo_ids").is_some());
     }
 }
