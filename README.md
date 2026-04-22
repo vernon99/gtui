@@ -1,14 +1,14 @@
 # GTUI
 
 GTUI is a standalone local web dashboard for a Gas Town workspace. It serves a
-single-page UI from `index.html` and a Python standard-library backend from
-`server.py`.
+static single-page UI from `index.html` plus `static/` assets, with a Python
+standard-library backend from `server.py`.
 
 ## Features
 
 - Task spine graph with dependency and commit-lineage edges.
-- Agent activity grouped by hooked task, including tmux pane logs when
-  available.
+- Agent activity grouped by hooked task, with detailed terminal/transcript
+  rendering loaded on demand.
 - Git memory viewer for recent commits, branches, worktrees, and diff-on-demand.
 - Local activity feed from Gas Town.
 - Light intervention hooks for retrying a running task, pausing agents, nudging,

@@ -17,7 +17,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -27,6 +27,10 @@ CODEX_SESSIONS_ROOT = Path.home() / ".codex" / "sessions"
 CODEX_ROLLOUT_SCAN_LIMIT = 160
 CODEX_ROLLOUT_LIST_TTL_SECONDS = 3.0
 CODEX_ROLLOUT_HEAD_BYTES = 32768
+CLAUDE_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
+CLAUDE_SESSION_SCAN_LIMIT = 120
+CLAUDE_SESSION_LIST_TTL_SECONDS = 3.0
+CLAUDE_SESSION_HEAD_BYTES = 32768
 
 JSON_HEADERS = {
     "Content-Type": "application/json; charset=utf-8",
@@ -46,6 +50,18 @@ def ensure_local_bin_on_path() -> None:
 TEXT_HEADERS = {
     "Content-Type": "text/plain; charset=utf-8",
     "Cache-Control": "no-store",
+}
+STATIC_ROOT = APP_ROOT / "static"
+STATIC_CONTENT_TYPES = {
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
 }
 
 SECTION_RE = re.compile(r"^[-\u2500]+\s+(.+?)\s+[-\u2500]+$")
@@ -113,6 +129,19 @@ def normalize_path_value(path_text: str) -> str:
         return os.path.normpath(os.path.realpath(path_text))
     except OSError:
         return os.path.normpath(path_text)
+
+
+def normalize_command_name(command: str) -> str:
+    return os.path.basename(str(command or "").strip()).lower()
+
+
+def is_codex_command(command: str) -> bool:
+    return normalize_command_name(command) == "codex"
+
+
+def is_claude_command(command: str) -> bool:
+    # Claude Code may appear as node in tmux because the CLI is a Node process.
+    return normalize_command_name(command) in {"claude", "claude.exe", "node"}
 
 
 def read_file_head(path: Path, max_bytes: int) -> str:
@@ -237,8 +266,16 @@ def summarize_tool_call(name: str, arguments: Any) -> str:
         if command_text:
             return clip_text(command_text, 180)
 
+    if name.lower() == "bash" and isinstance(parsed, dict):
+        command_text = str(parsed.get("command") or "").strip()
+        description = str(parsed.get("description") or "").strip()
+        if command_text and description:
+            return clip_text(f"{description}: {command_text}", 180)
+        if command_text:
+            return clip_text(command_text, 180)
+
     if isinstance(parsed, dict):
-        for key in ("message", "cmd", "query", "question", "target", "chars"):
+        for key in ("message", "cmd", "command", "description", "file_path", "path", "pattern", "query", "question", "target", "chars"):
             value = str(parsed.get(key) or "").strip()
             if value:
                 return clip_text(f"{name}: {value}", 180)
@@ -259,6 +296,43 @@ def summarize_codex_event(payload: dict[str, Any]) -> str:
     if message:
         return clip_text(message, 180)
     return clip_text(event_type.replace("_", " ") or "event", 180)
+
+
+def encode_claude_project_dir(path_text: str) -> str:
+    normalized = normalize_path_value(path_text)
+    return normalized.replace(os.sep, "-") if normalized else ""
+
+
+def stringify_claude_tool_output(tool_result: Any, fallback: Any = "") -> str:
+    if isinstance(tool_result, dict):
+        stdout = str(tool_result.get("stdout") or "")
+        stderr = str(tool_result.get("stderr") or "")
+        if stdout or stderr:
+            return "\n".join(part for part in (stdout, stderr) if part).strip()
+    if fallback:
+        return stringify_tool_output(fallback)
+    return stringify_tool_output(tool_result)
+
+
+def extract_claude_text_block(block: dict[str, Any]) -> str:
+    text = block.get("text")
+    if isinstance(text, str):
+        return text.strip()
+    content = block.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    return ""
+
+
+def summarize_claude_event(record: dict[str, Any]) -> str:
+    subtype = str(record.get("subtype") or "")
+    if subtype == "stop_hook_summary":
+        return "Stop hook summary"
+    if subtype == "turn_duration":
+        count = record.get("messageCount")
+        return f"Turn duration · {count} messages" if count is not None else "Turn duration"
+    event_type = str(record.get("type") or "")
+    return clip_text((subtype or event_type).replace("_", " ") or "event", 180)
 
 
 def format_timestamp_short(timestamp: str) -> str:
@@ -890,34 +964,6 @@ def collect_agents(
         agent["task_events"] = task_event_map.get(target, [])[-6:]
         agent["recent_task"] = agent["task_events"][-1] if agent["task_events"] else None
 
-    tmux_socket = status_summary.get("tmux_socket", "")
-    if tmux_socket:
-        capture_targets = [agent for agent in agents_by_target.values() if agent.get("session_name")]
-        with ThreadPoolExecutor(max_workers=worker_count(len(capture_targets))) as executor:
-            future_map = {
-                executor.submit(
-                    run_command,
-                    ["tmux", "-L", tmux_socket, "capture-pane", "-p", "-t", agent.get("session_name", ""), "-S", "-180"],
-                    cwd=gt_root,
-                    timeout=2.0,
-                ): agent
-                for agent in capture_targets
-            }
-            for future in as_completed(future_map):
-                agent = future_map[future]
-                capture_result = future.result()
-                duration_ms += capture_result.duration_ms
-                if not capture_result.ok:
-                    errors.append(capture_result.to_error())
-                    agent["log_lines"] = []
-                else:
-                    agent["log_lines"] = normalize_lines(capture_result.data, limit=140)
-        for agent in agents_by_target.values():
-            agent.setdefault("log_lines", [])
-    else:
-        for agent in agents_by_target.values():
-            agent["log_lines"] = []
-
     agents = list(agents_by_target.values())
     agents.sort(key=lambda item: (item.get("scope", ""), item.get("role", ""), item.get("target", "")))
     return agents, hook_by_issue, errors, duration_ms
@@ -1453,7 +1499,6 @@ def build_activity_groups(
             "current_path": agent.get("current_path", ""),
             "session_name": agent.get("session_name", ""),
             "hook": hook,
-            "log_lines": agent.get("log_lines", []),
             "events": agent.get("events", [])[-6:],
             "crew": agent.get("crew", {}),
             "polecat": agent.get("polecat", {}),
@@ -1462,7 +1507,6 @@ def build_activity_groups(
         if not bead_id:
             if (
                 agent_payload["events"]
-                or agent_payload["log_lines"]
                 or agent_payload["has_session"]
                 or agent_payload["runtime_state"]
             ):
@@ -1702,11 +1746,15 @@ class SnapshotStore:
         self.interval_seconds = interval_seconds
         self.lock = threading.Lock()
         self.codex_lock = threading.Lock()
+        self.claude_lock = threading.Lock()
         self.action_lock = threading.Lock()
         self.action_history: list[dict[str, Any]] = []
         self.codex_rollout_list_cache: dict[str, Any] = {"expires_at": 0.0, "files": []}
         self.codex_rollout_meta_cache: dict[str, dict[str, Any]] = {}
         self.codex_transcript_cache: dict[str, dict[str, Any]] = {}
+        self.claude_session_list_cache: dict[str, Any] = {"expires_at": 0.0, "files": []}
+        self.claude_session_meta_cache: dict[str, dict[str, Any]] = {}
+        self.claude_transcript_cache: dict[str, dict[str, Any]] = {}
         self.snapshot: dict[str, Any] = {
             "generated_at": now_iso(),
             "generation_ms": 0,
@@ -1950,6 +1998,7 @@ class SnapshotStore:
                 items.append(trailing_reasoning)
         view = {
             "available": bool(items),
+            "provider": "codex",
             "source": "codex-rollout",
             "session_file": str(path),
             "session_name": path.name,
@@ -1964,7 +2013,7 @@ class SnapshotStore:
     def get_codex_view(self, agent: dict[str, Any]) -> dict[str, Any]:
         current_command = str(agent.get("current_command", "") or "")
         current_path = str(agent.get("current_path", "") or "")
-        if current_command != "codex" or not current_path:
+        if not is_codex_command(current_command) or not current_path:
             return {}
         rollout = self.find_codex_rollout(current_path)
         if not rollout:
@@ -1975,6 +2024,286 @@ class SnapshotStore:
         view["cwd"] = str(rollout.get("cwd") or "")
         view["session_id"] = str(rollout.get("session_id") or "")
         return view
+
+    def list_recent_claude_sessions(self, current_path: str) -> list[Path]:
+        encoded = encode_claude_project_dir(current_path)
+        if encoded:
+            project_dir = CLAUDE_PROJECTS_ROOT / encoded
+            if project_dir.is_dir():
+                try:
+                    return sorted(
+                        project_dir.glob("*.jsonl"),
+                        key=lambda path: path.stat().st_mtime,
+                        reverse=True,
+                    )[:CLAUDE_SESSION_SCAN_LIMIT]
+                except OSError:
+                    return []
+
+        now = time.time()
+        with self.claude_lock:
+            cached_files = self.claude_session_list_cache.get("files", [])
+            expires_at = float(self.claude_session_list_cache.get("expires_at", 0.0) or 0.0)
+            if cached_files and expires_at > now:
+                return [Path(path_text) for path_text in cached_files]
+
+        files: list[Path] = []
+        if CLAUDE_PROJECTS_ROOT.is_dir():
+            try:
+                files = sorted(
+                    CLAUDE_PROJECTS_ROOT.glob("**/*.jsonl"),
+                    key=lambda path: path.stat().st_mtime,
+                    reverse=True,
+                )[:CLAUDE_SESSION_SCAN_LIMIT]
+            except OSError:
+                files = []
+
+        with self.claude_lock:
+            self.claude_session_list_cache = {
+                "expires_at": now + CLAUDE_SESSION_LIST_TTL_SECONDS,
+                "files": [str(path) for path in files],
+            }
+        return files
+
+    def get_claude_session_meta(self, path: Path) -> dict[str, Any]:
+        try:
+            stat = path.stat()
+        except OSError:
+            return {}
+
+        cache_key = str(path)
+        signature = (stat.st_mtime_ns, stat.st_size)
+        with self.claude_lock:
+            cached = self.claude_session_meta_cache.get(cache_key)
+            if cached and cached.get("signature") == signature:
+                return deep_copy_json(cached.get("meta") or {})
+
+        meta: dict[str, Any] = {
+            "path": str(path),
+            "cwd": "",
+            "session_id": path.stem,
+            "modified_at": datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(timespec="seconds"),
+            "mtime": stat.st_mtime,
+        }
+        for record in iter_jsonl_records(read_file_head(path, CLAUDE_SESSION_HEAD_BYTES)):
+            if record.get("cwd") and not meta["cwd"]:
+                meta["cwd"] = str(record.get("cwd") or "")
+            if record.get("sessionId"):
+                meta["session_id"] = str(record.get("sessionId") or meta["session_id"])
+            if meta["cwd"] and meta["session_id"]:
+                break
+
+        meta["cwd"] = normalize_path_value(str(meta.get("cwd") or ""))
+        with self.claude_lock:
+            self.claude_session_meta_cache[cache_key] = {"signature": signature, "meta": deep_copy_json(meta)}
+        return meta
+
+    def find_claude_session(self, current_path: str) -> dict[str, Any] | None:
+        best_meta: dict[str, Any] | None = None
+        best_score = -1
+        for path in self.list_recent_claude_sessions(current_path):
+            meta = self.get_claude_session_meta(path)
+            score = match_path_score(current_path, str(meta.get("cwd") or ""))
+            if score < 0:
+                continue
+            modified_at = float(meta.get("mtime") or 0.0)
+            if score > best_score:
+                best_score = score
+                best_meta = meta
+                continue
+            if score == best_score and best_meta and modified_at > float(best_meta.get("mtime") or 0.0):
+                best_meta = meta
+        return deep_copy_json(best_meta) if best_meta else None
+
+    def parse_claude_transcript(self, path_text: str) -> dict[str, Any]:
+        path = Path(path_text)
+        try:
+            stat = path.stat()
+        except OSError:
+            return {}
+
+        cache_key = str(path)
+        signature = (stat.st_mtime_ns, stat.st_size)
+        with self.claude_lock:
+            cached = self.claude_transcript_cache.get(cache_key)
+            if cached and cached.get("signature") == signature:
+                return deep_copy_json(cached.get("view") or {})
+
+        items: list[dict[str, Any]] = []
+        call_map: dict[str, dict[str, str]] = {}
+        last_model = ""
+        for record in iter_jsonl_records(read_file_text(path)):
+            if record.get("isSidechain") is True:
+                continue
+            timestamp = str(record.get("timestamp") or "")
+            record_type = str(record.get("type") or "")
+            message = record.get("message") if isinstance(record.get("message"), dict) else {}
+            content = message.get("content")
+
+            if record_type == "user":
+                if isinstance(content, str):
+                    text = content.strip()
+                    if text:
+                        items.append(
+                            {
+                                "kind": "user",
+                                "text": text,
+                                "time": format_timestamp_short(timestamp),
+                                "timestamp": timestamp,
+                            }
+                        )
+                    continue
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = str(block.get("type") or "")
+                    if block_type == "tool_result":
+                        call_id = str(block.get("tool_use_id") or "")
+                        tool_info = call_map.get(call_id, {})
+                        output_text = stringify_claude_tool_output(record.get("toolUseResult"), block.get("content"))
+                        items.append(
+                            {
+                                "kind": "tool_output",
+                                "tool": str(tool_info.get("tool") or ""),
+                                "summary": summarize_tool_output(output_text),
+                                "text": excerpt_tool_output(output_text),
+                                "call_id": call_id,
+                                "is_error": bool(block.get("is_error")),
+                                "time": format_timestamp_short(timestamp),
+                                "timestamp": timestamp,
+                            }
+                        )
+                    elif block_type == "text":
+                        text = extract_claude_text_block(block)
+                        if text:
+                            items.append(
+                                {
+                                    "kind": "user",
+                                    "text": text,
+                                    "time": format_timestamp_short(timestamp),
+                                    "timestamp": timestamp,
+                                }
+                            )
+                continue
+
+            if record_type == "assistant":
+                model = str(message.get("model") or "")
+                if model:
+                    last_model = model
+                if isinstance(content, str):
+                    text = content.strip()
+                    if text:
+                        items.append(
+                            {
+                                "kind": "assistant",
+                                "text": text,
+                                "model": model,
+                                "time": format_timestamp_short(timestamp),
+                                "timestamp": timestamp,
+                            }
+                        )
+                    continue
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = str(block.get("type") or "")
+                    if block_type == "text":
+                        text = extract_claude_text_block(block)
+                        if text:
+                            items.append(
+                                {
+                                    "kind": "assistant",
+                                    "text": text,
+                                    "model": model,
+                                    "time": format_timestamp_short(timestamp),
+                                    "timestamp": timestamp,
+                                }
+                            )
+                    elif block_type == "tool_use":
+                        tool_name = str(block.get("name") or "")
+                        call_id = str(block.get("id") or "")
+                        tool_input = block.get("input") if isinstance(block.get("input"), dict) else {}
+                        summary = summarize_tool_call(tool_name, tool_input)
+                        if call_id:
+                            call_map[call_id] = {"tool": tool_name, "summary": summary}
+                        items.append(
+                            {
+                                "kind": "tool_call",
+                                "tool": tool_name,
+                                "summary": summary,
+                                "call_id": call_id,
+                                "time": format_timestamp_short(timestamp),
+                                "timestamp": timestamp,
+                            }
+                        )
+                    elif block_type == "thinking":
+                        reasoning_item = {
+                            "kind": "reasoning",
+                            "summary": "Thinking...",
+                            "time": format_timestamp_short(timestamp),
+                            "timestamp": timestamp,
+                        }
+                        if items and items[-1].get("kind") == "reasoning":
+                            items[-1] = reasoning_item
+                        else:
+                            items.append(reasoning_item)
+                continue
+
+            # Claude Code writes internal lifecycle metadata such as
+            # stop_hook_summary and turn_duration into the JSONL. Those are not
+            # user-visible transcript content.
+            if record_type == "system":
+                continue
+
+        if items:
+            trailing_reasoning = items[-1] if items[-1].get("kind") == "reasoning" else None
+            items = [item for item in items if item.get("kind") != "reasoning"]
+            if trailing_reasoning:
+                items.append(trailing_reasoning)
+
+        view = {
+            "available": bool(items),
+            "provider": "claude",
+            "source": "claude-session",
+            "session_file": str(path),
+            "session_name": path.name,
+            "model": last_model,
+            "revision": f"{stat.st_mtime_ns}:{stat.st_size}",
+            "updated_at": datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(timespec="seconds"),
+            "items": items,
+        }
+        with self.claude_lock:
+            self.claude_transcript_cache[cache_key] = {"signature": signature, "view": deep_copy_json(view)}
+        return view
+
+    def get_claude_view(self, agent: dict[str, Any]) -> dict[str, Any]:
+        current_command = str(agent.get("current_command", "") or "")
+        current_path = str(agent.get("current_path", "") or "")
+        if not current_path:
+            return {}
+        if current_command and not is_claude_command(current_command):
+            return {}
+        claude_session = self.find_claude_session(current_path)
+        if not claude_session:
+            return {}
+        view = self.parse_claude_transcript(str(claude_session.get("path") or ""))
+        if not view.get("available"):
+            return {}
+        view["cwd"] = str(claude_session.get("cwd") or "")
+        view["session_id"] = str(claude_session.get("session_id") or "")
+        return view
+
+    def get_transcript_view(self, agent: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        codex_view = self.get_codex_view(agent)
+        if codex_view.get("available"):
+            return codex_view, codex_view, {}
+        claude_view = self.get_claude_view(agent)
+        if claude_view.get("available"):
+            return claude_view, {}, claude_view
+        return {}, {}, {}
 
     def discover_agent(self, target: str) -> dict[str, Any] | None:
         cached_agent = self.get_agent(target)
@@ -2002,8 +2331,8 @@ class SnapshotStore:
         tmux_target = str(agent.get("pane_id", "") or agent.get("session_name", "") or "")
         log_lines: list[str] = []
         capture_error = ""
-        codex_view = self.get_codex_view(agent)
-        if tmux_socket and tmux_target and not codex_view.get("available"):
+        transcript_view, codex_view, claude_view = self.get_transcript_view(agent)
+        if tmux_socket and tmux_target and not transcript_view.get("available"):
             capture_result = run_command(
                 ["tmux", "-L", tmux_socket, "capture-pane", "-p", "-t", tmux_target, "-S", "-240"],
                 cwd=self.gt_root,
@@ -2043,7 +2372,9 @@ class SnapshotStore:
             "recent_task": deep_copy_json(agent.get("recent_task") or {}),
             "log_lines": log_lines,
             "codex_view": codex_view,
-            "render_mode": "codex" if codex_view.get("available") else "terminal",
+            "claude_view": claude_view,
+            "transcript_view": transcript_view,
+            "render_mode": str(transcript_view.get("provider") or "terminal") if transcript_view.get("available") else "terminal",
             "services": self.get_services(),
             "capture_error": capture_error,
             "generated_at": now_iso(),
@@ -2138,7 +2469,7 @@ class SnapshotStore:
 
             last_result: CommandResult | None = None
             last_command: list[str] = []
-            if current_command == "codex":
+            if is_codex_command(current_command):
                 load_buffer_command = ["tmux", "-L", tmux_socket, "load-buffer", "-"]
                 last_command = load_buffer_command
                 last_result = run_command(
@@ -2248,6 +2579,9 @@ class GTUIHandler(BaseHTTPRequestHandler):
         if parsed.path in {"/", "/index.html"}:
             self._serve_file(APP_ROOT / "index.html", HTML_HEADERS)
             return
+        if parsed.path.startswith("/static/"):
+            self._serve_static(parsed.path)
+            return
         if parsed.path == "/api/snapshot":
             payload = json.dumps(self.store.get()).encode("utf-8")
             self._respond(HTTPStatus.OK, payload, JSON_HEADERS)
@@ -2324,6 +2658,30 @@ class GTUIHandler(BaseHTTPRequestHandler):
             self._respond(HTTPStatus.NOT_FOUND, b"not found\n", TEXT_HEADERS)
             return
         self._respond(HTTPStatus.OK, path.read_bytes(), headers)
+
+    def _serve_static(self, request_path: str) -> None:
+        relative_text = unquote(request_path.removeprefix("/static/"))
+        relative_path = Path(relative_text)
+        if (
+            relative_path.is_absolute()
+            or not relative_path.parts
+            or any(part in {"", ".", ".."} for part in relative_path.parts)
+        ):
+            self._respond(HTTPStatus.NOT_FOUND, b"not found\n", TEXT_HEADERS)
+            return
+
+        try:
+            path = (STATIC_ROOT / relative_path).resolve()
+            path.relative_to(STATIC_ROOT.resolve())
+        except (OSError, ValueError):
+            self._respond(HTTPStatus.NOT_FOUND, b"not found\n", TEXT_HEADERS)
+            return
+
+        headers = {
+            "Content-Type": STATIC_CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream"),
+            "Cache-Control": "no-store",
+        }
+        self._serve_file(path, headers)
 
     def _respond(self, status: HTTPStatus, payload: bytes, headers: dict[str, str]) -> None:
         self.send_response(status.value)
