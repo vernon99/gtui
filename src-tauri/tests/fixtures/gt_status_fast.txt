@@ -1,0 +1,5 @@
+Town: gastown
+/home/user/gt
+👤 Overseer: mayor
+Services:   daemon (running)  witness (running)  dolt (running)
+tmux (-L gastown, 3 sessions)
