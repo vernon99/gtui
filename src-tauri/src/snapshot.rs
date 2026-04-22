@@ -1010,6 +1010,7 @@ impl SnapshotStore {
             return Err(err);
         }
 
+        let terminal = self.get_terminal_state(target).await?;
         let action = json!({
             "kind": "write-terminal",
             "target": target,
@@ -1017,6 +1018,7 @@ impl SnapshotStore {
             "ok": true,
             "output": format!("Sent to {target}"),
             "timestamp": now_iso(),
+            "terminal": terminal,
         });
         self.record_action(action.clone());
         Ok(action)
