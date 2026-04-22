@@ -328,6 +328,77 @@ fn empty_fixture_stores_are_zero() {
 }
 
 #[test]
+fn populated_fixture_crews_carry_enrichment_and_running_metadata() {
+    let snap = load_fixture_json(POPULATED);
+    let crews = snap["crews"].as_array().expect("crews must be an array");
+    assert!(!crews.is_empty(), "populated fixture should list crews");
+
+    // Every crew row is expected to carry merged running-state metadata
+    // (branch/has_session/mail_*) alongside the enrichment fields added by
+    // `enrich_crew_workspace`. The Rust port of `merge_crews` must preserve
+    // this contract.
+    for (i, crew) in crews.iter().enumerate() {
+        assert_keys_present(
+            crew,
+            &[
+                "branch",
+                "git_benign_modified",
+                "git_benign_untracked",
+                "git_has_local_state_only",
+                "git_has_risky_changes",
+                "git_modified",
+                "git_risky_modified",
+                "git_risky_untracked",
+                "git_state",
+                "git_status_label",
+                "git_status_tone",
+                "git_untracked",
+                "has_session",
+                "name",
+                "path",
+                "rig",
+            ],
+            &format!("crews[{i}]"),
+        );
+    }
+
+    // Ordering contract: crews sort by (rig, name).
+    let keys: Vec<(String, String)> = crews
+        .iter()
+        .map(|c| {
+            (
+                c["rig"].as_str().unwrap_or("").to_string(),
+                c["name"].as_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+    let mut sorted = keys.clone();
+    sorted.sort();
+    assert_eq!(keys, sorted, "crews must be sorted by (rig, name)");
+
+    // The partition invariant: modified = benign_modified + risky_modified
+    // (same for untracked). Any captured crew must satisfy it.
+    for (i, crew) in crews.iter().enumerate() {
+        let modified = array_len(crew, &["git_modified"]);
+        let benign = array_len(crew, &["git_benign_modified"]);
+        let risky = array_len(crew, &["git_risky_modified"]);
+        assert_eq!(
+            modified,
+            benign + risky,
+            "crews[{i}].git_modified must equal git_benign_modified + git_risky_modified"
+        );
+        let untracked = array_len(crew, &["git_untracked"]);
+        let benign_u = array_len(crew, &["git_benign_untracked"]);
+        let risky_u = array_len(crew, &["git_risky_untracked"]);
+        assert_eq!(
+            untracked,
+            benign_u + risky_u,
+            "crews[{i}].git_untracked must equal git_benign_untracked + git_risky_untracked"
+        );
+    }
+}
+
+#[test]
 fn populated_fixture_agents_carry_expected_keys() {
     let snap = load_fixture_json(POPULATED);
     let agents = snap["agents"].as_array().expect("agents must be an array");
