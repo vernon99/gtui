@@ -1,0 +1,3899 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GTUI</title>
+  <style>
+    :root {
+      --bg: #0a0f10;
+      --bg-2: #0f1718;
+      --panel: rgba(14, 22, 23, 0.9);
+      --panel-2: rgba(19, 30, 31, 0.92);
+      --line: rgba(230, 225, 211, 0.1);
+      --text: #f2eadc;
+      --muted: #a39b8d;
+      --running: #ff8a3d;
+      --stuck: #ff6767;
+      --ready: #60d3c5;
+      --done: #8de5a8;
+      --ice: #8eb5ff;
+      --memory: #f3cb7a;
+      --accent: #f7b267;
+      --shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+      --radius: 22px;
+      --radius-sm: 16px;
+      --mono: "Iosevka", "SFMono-Regular", "Menlo", "Monaco", monospace;
+      --sans: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
+      --display: "Avenir Next Condensed", "Futura", "Trebuchet MS", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      background:
+        radial-gradient(circle at top left, rgba(96, 211, 197, 0.14), transparent 28%),
+        radial-gradient(circle at 85% 5%, rgba(255, 138, 61, 0.16), transparent 24%),
+        linear-gradient(180deg, #121110 0%, #090d0d 52%, #050707 100%);
+      color: var(--text);
+      font-family: var(--sans);
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+      background-size: 32px 32px;
+      mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.7), transparent 90%);
+    }
+
+    button, input, textarea, select {
+      font: inherit;
+    }
+
+    button {
+      appearance: none;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text);
+      padding: 10px 14px;
+      border-radius: 999px;
+      cursor: pointer;
+      transition: background 120ms ease, transform 120ms ease, border-color 120ms ease;
+    }
+
+    button:hover:enabled {
+      background: rgba(255, 255, 255, 0.1);
+      transform: translateY(-1px);
+      border-color: rgba(255, 255, 255, 0.18);
+    }
+
+    button:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    input, textarea, select {
+      width: 100%;
+      border-radius: 14px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(4, 7, 8, 0.56);
+      color: var(--text);
+      padding: 11px 12px;
+    }
+
+    textarea {
+      min-height: 92px;
+      resize: vertical;
+    }
+
+    .shell {
+      width: min(1680px, calc(100% - 28px));
+      margin: 14px auto 26px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(360px, 0.95fr);
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .hero-card,
+    .panel,
+    .metric,
+    .feed-card,
+    .group-card,
+    .repo-card {
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(20, 30, 31, 0.96), rgba(10, 15, 16, 0.94));
+      box-shadow: var(--shadow);
+      border-radius: var(--radius);
+      backdrop-filter: blur(18px);
+    }
+
+    .hero-card {
+      padding: 22px 24px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero-card::after {
+      content: "";
+      position: absolute;
+      inset: auto -10% -45% 48%;
+      height: 180px;
+      background: radial-gradient(circle, rgba(247, 178, 103, 0.16), transparent 70%);
+      pointer-events: none;
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      color: var(--ready);
+      font-size: 0.74rem;
+      font-weight: 700;
+    }
+
+    h1 {
+      margin: 0;
+      font-family: var(--display);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      line-height: 0.94;
+      font-size: clamp(2.8rem, 4.4vw, 5rem);
+    }
+
+    .subtitle {
+      margin: 12px 0 0;
+      max-width: 70ch;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    .hero-grid {
+      display: grid;
+      gap: 12px;
+    }
+
+    .live-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .live-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, #84f0ab, #d6fdbd);
+      color: #102214;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-size: 0.8rem;
+    }
+
+    .live-pill.stale {
+      background: linear-gradient(135deg, var(--memory), #ffe6ab);
+      color: #342309;
+    }
+
+    .live-pill.error {
+      background: linear-gradient(135deg, #ff7e7e, #ffc1c1);
+      color: #341010;
+    }
+
+    .pulse {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: currentColor;
+      animation: pulse 1.4s infinite;
+    }
+
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0.35); }
+      70% { box-shadow: 0 0 0 12px rgba(0, 0, 0, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); }
+    }
+
+    .stamp-grid {
+      display: grid;
+      gap: 10px;
+    }
+
+    .stamp {
+      padding: 12px 14px;
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+    }
+
+    .stamp-label {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .stamp-value {
+      font-size: 0.96rem;
+      line-height: 1.45;
+      word-break: break-word;
+    }
+
+    .metrics-panel {
+      margin-bottom: 16px;
+      overflow: hidden;
+    }
+
+    .metrics-table-wrap {
+      overflow-x: auto;
+    }
+
+    .control-surface-toolbar {
+      justify-content: flex-end;
+    }
+
+    .control-surface-meta {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .surface-card {
+      padding: 12px 14px;
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      min-width: 0;
+    }
+
+    .surface-card-label {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .surface-card-value {
+      font-size: 0.96rem;
+      line-height: 1.45;
+      word-break: break-word;
+    }
+
+    .metrics-table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+
+    .metrics-table td {
+      padding: 10px 12px 11px;
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+      border-right: 1px solid rgba(255, 255, 255, 0.05);
+      vertical-align: top;
+    }
+
+    .metrics-table td:last-child {
+      border-right: 0;
+    }
+
+    .metrics-table-label {
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 0.71rem;
+      margin-bottom: 6px;
+    }
+
+    .metrics-table-value {
+      font-family: var(--display);
+      font-size: clamp(1.2rem, 1.5vw, 1.8rem);
+      line-height: 1;
+      margin-bottom: 6px;
+    }
+
+    .metrics-table-sub {
+      color: var(--muted);
+      font-size: 0.79rem;
+      line-height: 1.3;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .accent-running { color: var(--running); }
+    .accent-stuck { color: var(--stuck); }
+    .accent-ready { color: var(--ready); }
+    .accent-done { color: var(--done); }
+    .accent-memory { color: var(--memory); }
+    .accent-ice { color: var(--ice); }
+
+    .panel {
+      padding: 18px;
+    }
+
+    .panel-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .panel-head h2 {
+      margin: 0;
+      font-family: var(--display);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 1.52rem;
+    }
+
+    .subtle {
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .filter-group {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .filter-group select {
+      width: auto;
+      min-width: 140px;
+      padding-right: 34px;
+    }
+
+    .toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .toggle input {
+      width: auto;
+      margin: 0;
+    }
+
+    .main-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.7fr) minmax(360px, 0.8fr);
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .main-grid > *,
+    .lower-grid > *,
+    .overview-grid > *,
+    .raw-grid > *,
+    .terminal-main > * {
+      min-width: 0;
+    }
+
+    .lower-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .overview-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .raw-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .terminal-main {
+      display: grid;
+      grid-template-columns: minmax(0, 1.45fr) minmax(300px, 0.85fr);
+      gap: 14px;
+      margin-bottom: 16px;
+    }
+
+    .section-gap {
+      margin-bottom: 16px;
+    }
+
+    .terminal-shell {
+      display: grid;
+      gap: 12px;
+    }
+
+    .terminal-meta {
+      display: grid;
+      gap: 12px;
+    }
+
+    .graph-wrap {
+      position: relative;
+      min-height: 560px;
+      border-radius: 18px;
+      overflow: auto;
+      cursor: grab;
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+      touch-action: none;
+      background:
+        linear-gradient(180deg, rgba(6, 9, 10, 0.58), rgba(14, 19, 20, 0.42)),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+        linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+      background-size: auto, 48px 48px, 48px 48px;
+      border: 1px solid rgba(255, 255, 255, 0.04);
+    }
+
+    .graph-wrap::-webkit-scrollbar {
+      width: 0;
+      height: 0;
+      display: none;
+    }
+
+    .graph-wrap.dragging {
+      cursor: grabbing;
+      user-select: none;
+    }
+
+    .graph-stage {
+      position: relative;
+      min-width: 100%;
+    }
+
+    .graph-svg {
+      position: absolute;
+      inset: 0;
+      overflow: visible;
+    }
+
+    .graph-nodes {
+      position: relative;
+    }
+
+    .graph-edge {
+      fill: none;
+      stroke-width: 2.4;
+      opacity: 0.56;
+    }
+
+    .graph-edge.dependency { stroke: rgba(255, 255, 255, 0.35); }
+    .graph-edge.parent { stroke: rgba(96, 211, 197, 0.45); stroke-dasharray: 7 6; }
+    .graph-edge.commit { stroke: rgba(243, 203, 122, 0.55); stroke-dasharray: 4 5; }
+    .graph-edge.active { opacity: 0.95; }
+    .graph-edge.muted { opacity: 0.14; }
+
+    .node {
+      position: absolute;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 18px;
+      padding: 12px 14px;
+      text-align: left;
+      color: var(--text);
+      background: linear-gradient(180deg, rgba(16, 24, 25, 0.98), rgba(8, 12, 13, 0.96));
+      box-shadow: 0 18px 38px rgba(0, 0, 0, 0.28);
+      cursor: pointer;
+      transition: transform 120ms ease, border-color 120ms ease, box-shadow 120ms ease, opacity 120ms ease;
+    }
+
+    .node:hover {
+      transform: translateY(-2px);
+    }
+
+    .node.selected {
+      border-color: rgba(247, 178, 103, 0.9);
+      box-shadow: 0 0 0 2px rgba(247, 178, 103, 0.2), 0 20px 42px rgba(0, 0, 0, 0.32);
+    }
+
+    .node.muted {
+      opacity: 0.3;
+    }
+
+    .node.task { width: 244px; min-height: 92px; }
+    .node.commit { width: 176px; min-height: 58px; border-radius: 999px; }
+    .node.running { border-color: rgba(255, 138, 61, 0.7); }
+    .node.stuck { border-color: rgba(255, 103, 103, 0.65); }
+    .node.ready { border-color: rgba(96, 211, 197, 0.56); }
+    .node.done { border-color: rgba(141, 229, 168, 0.55); }
+    .node.ice { border-color: rgba(142, 181, 255, 0.55); }
+    .node.memory { border-color: rgba(243, 203, 122, 0.7); }
+
+    .node-top {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+
+    .node-id {
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      color: var(--memory);
+      letter-spacing: 0.04em;
+    }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex: none;
+    }
+
+    .status-dot.running { background: var(--running); }
+    .status-dot.stuck { background: var(--stuck); }
+    .status-dot.ready { background: var(--ready); }
+    .status-dot.done { background: var(--done); }
+    .status-dot.ice { background: var(--ice); }
+    .status-dot.memory { background: var(--memory); }
+
+    .node-title {
+      font-weight: 800;
+      line-height: 1.35;
+      font-size: 0.94rem;
+    }
+
+    .node-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin-top: 10px;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 5px 9px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--muted);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      font-size: 0.78rem;
+      line-height: 1;
+    }
+
+    .chip.running {
+      background: rgba(255, 138, 61, 0.15);
+      color: #ffd1b3;
+      border-color: rgba(255, 138, 61, 0.28);
+    }
+
+    .chip.stuck {
+      background: rgba(255, 103, 103, 0.15);
+      color: #ffd0d0;
+      border-color: rgba(255, 103, 103, 0.28);
+    }
+
+    .chip.ready {
+      background: rgba(96, 211, 197, 0.15);
+      color: #c8fff8;
+      border-color: rgba(96, 211, 197, 0.28);
+    }
+
+    .chip.done {
+      background: rgba(141, 229, 168, 0.15);
+      color: #d9ffe4;
+      border-color: rgba(141, 229, 168, 0.28);
+    }
+
+    .chip.memory {
+      background: rgba(243, 203, 122, 0.15);
+      color: #fff1c4;
+      border-color: rgba(243, 203, 122, 0.28);
+    }
+
+    .chip.ice {
+      background: rgba(142, 181, 255, 0.15);
+      color: #dbe8ff;
+      border-color: rgba(142, 181, 255, 0.28);
+    }
+
+    .legend {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 0.83rem;
+    }
+
+    .focus-stack,
+    .stack {
+      display: grid;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .focus-title {
+      font-size: 1.18rem;
+      font-weight: 800;
+      line-height: 1.35;
+    }
+
+    .focus-description {
+      color: var(--muted);
+      line-height: 1.58;
+      font-size: 0.95rem;
+      max-height: 180px;
+      overflow: auto;
+      padding-right: 4px;
+      min-width: 0;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .card {
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 16px;
+      padding: 14px;
+      background: rgba(255, 255, 255, 0.03);
+      min-width: 0;
+      max-width: 100%;
+      box-sizing: border-box;
+    }
+
+    .card h3 {
+      margin: 0 0 10px;
+      font-size: 0.86rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+    }
+
+    .mono {
+      font-family: var(--mono);
+    }
+
+    .agent-row,
+    .memory-row,
+    .commit-row {
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      min-width: 0;
+      max-width: 100%;
+      box-sizing: border-box;
+    }
+
+    .agent-top,
+    .memory-top,
+    .commit-top,
+    .group-top {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .tiny-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .tiny-actions button {
+      padding: 8px 11px;
+      font-size: 0.84rem;
+    }
+
+    .empty {
+      padding: 16px;
+      border: 1px dashed rgba(255, 255, 255, 0.08);
+      border-radius: 16px;
+      color: var(--muted);
+      text-align: center;
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .feed-list {
+      display: grid;
+      gap: 12px;
+      align-content: start;
+      min-width: 0;
+    }
+
+    .swarm-feed-panel {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .swarm-feed-panel .feed-list {
+      flex: 1 1 auto;
+    }
+
+    .feed-list.single-feed-group {
+      height: 100%;
+    }
+
+    .feed-list.single-feed-group > .group-card {
+      min-height: 100%;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .roster-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .terminal-roster-grid {
+      grid-template-columns: minmax(0, 1fr);
+      margin-bottom: 0;
+    }
+
+    .roster-card {
+      padding: 14px;
+      min-width: 0;
+      max-width: 100%;
+      box-sizing: border-box;
+    }
+
+    .roster-main {
+      display: grid;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .roster-main > * {
+      min-width: 0;
+      max-width: 100%;
+    }
+
+    .roster-task {
+      display: grid;
+      gap: 6px;
+    }
+
+    .roster-task-title {
+      font-weight: 800;
+      line-height: 1.35;
+      font-size: 0.98rem;
+    }
+
+    .roster-churn {
+      padding: 12px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      display: grid;
+      gap: 8px;
+    }
+
+    .roster-churn-label {
+      color: var(--muted);
+      font-size: 0.76rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .roster-churn-text {
+      line-height: 1.5;
+    }
+
+    .group-card {
+      padding: 14px;
+      min-width: 0;
+      max-width: 100%;
+      box-sizing: border-box;
+    }
+
+    .roster-card .agent-top {
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+
+    .roster-card .agent-top > :first-child {
+      flex: 1 1 240px;
+      min-width: 0;
+    }
+
+    .roster-card .tiny-actions {
+      flex: 0 0 auto;
+      max-width: 100%;
+      justify-content: flex-end;
+    }
+
+    .roster-card .feed-title,
+    .roster-card .subtle,
+    .roster-card .mono,
+    .roster-card .roster-task-title,
+    .roster-card .roster-churn-text,
+    .roster-card details,
+    .roster-card details summary,
+    .roster-card pre {
+      min-width: 0;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      box-sizing: border-box;
+    }
+
+    .group-header {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .agent-grid {
+      display: grid;
+      gap: 10px;
+      align-items: stretch;
+    }
+
+    .agent-grid.single-agent {
+      min-height: 100%;
+    }
+
+    .feed-card {
+      padding: 12px;
+      border-radius: 16px;
+      display: grid;
+      gap: 12px;
+      align-content: start;
+      min-width: 0;
+    }
+
+    .agent-grid.single-agent > .feed-card {
+      min-height: 100%;
+    }
+
+    .feed-title {
+      font-weight: 800;
+    }
+
+    .log-block,
+    .event-block,
+    pre {
+      margin: 0;
+      padding: 12px;
+      border-radius: 14px;
+      background: rgba(4, 7, 8, 0.58);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      color: #d8d2c6;
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .primary-log-block {
+      min-height: 320px;
+      max-height: min(72vh, 980px);
+      overflow: auto;
+      overscroll-behavior: contain;
+      scrollbar-gutter: stable;
+    }
+
+    .feed-log-block {
+      min-height: 220px;
+      max-height: min(38vh, 360px);
+      overflow: auto;
+      overscroll-behavior: contain;
+      scrollbar-gutter: stable;
+    }
+
+    .codex-transcript {
+      display: grid;
+      gap: 12px;
+      padding: 14px;
+      align-content: start;
+    }
+
+    .codex-item {
+      display: grid;
+      gap: 7px;
+    }
+
+    .codex-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 0.76rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .codex-head-left {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .codex-role {
+      color: var(--text);
+      font-weight: 700;
+    }
+
+    .codex-phase {
+      color: var(--muted);
+    }
+
+    .codex-time {
+      flex: none;
+      white-space: nowrap;
+    }
+
+    .codex-bubble {
+      border-radius: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(255, 255, 255, 0.04);
+      padding: 12px 13px;
+      min-width: 0;
+    }
+
+    .codex-item.user .codex-bubble {
+      background: rgba(243, 203, 122, 0.08);
+      border-color: rgba(243, 203, 122, 0.18);
+    }
+
+    .codex-item.assistant .codex-bubble {
+      background: rgba(96, 211, 197, 0.07);
+      border-color: rgba(96, 211, 197, 0.14);
+    }
+
+    .codex-item.tool_call .codex-bubble,
+    .codex-item.tool_output .codex-bubble {
+      background: rgba(255, 255, 255, 0.03);
+      border-color: rgba(255, 255, 255, 0.07);
+    }
+
+    .codex-item.event .codex-bubble {
+      background: rgba(142, 181, 255, 0.08);
+      border-color: rgba(142, 181, 255, 0.16);
+    }
+
+    .codex-text,
+    .codex-summary,
+    .codex-event-text {
+      word-break: break-word;
+      line-height: 1.55;
+    }
+
+    .codex-item.user .codex-text,
+    .codex-event-text {
+      white-space: pre-wrap;
+    }
+
+    .codex-summary {
+      font-weight: 700;
+      line-height: 1.4;
+    }
+
+    .codex-markdown {
+      display: grid;
+      gap: 10px;
+    }
+
+    .codex-markdown > :first-child {
+      margin-top: 0;
+    }
+
+    .codex-markdown > :last-child {
+      margin-bottom: 0;
+    }
+
+    .codex-markdown p,
+    .codex-markdown ul,
+    .codex-markdown ol,
+    .codex-markdown blockquote,
+    .codex-markdown pre,
+    .codex-markdown h1,
+    .codex-markdown h2,
+    .codex-markdown h3,
+    .codex-markdown h4,
+    .codex-markdown h5,
+    .codex-markdown h6 {
+      margin: 0;
+    }
+
+    .codex-markdown h1,
+    .codex-markdown h2,
+    .codex-markdown h3,
+    .codex-markdown h4,
+    .codex-markdown h5,
+    .codex-markdown h6 {
+      font-family: var(--display);
+      line-height: 1.12;
+      letter-spacing: 0.03em;
+      text-transform: none;
+    }
+
+    .codex-markdown h1 { font-size: 1.45rem; }
+    .codex-markdown h2 { font-size: 1.28rem; }
+    .codex-markdown h3 { font-size: 1.16rem; }
+    .codex-markdown h4,
+    .codex-markdown h5,
+    .codex-markdown h6 { font-size: 1rem; }
+
+    .codex-markdown ul,
+    .codex-markdown ol {
+      padding-left: 1.2rem;
+      display: grid;
+      gap: 6px;
+    }
+
+    .codex-markdown li {
+      line-height: 1.5;
+    }
+
+    .codex-markdown blockquote {
+      padding-left: 12px;
+      border-left: 2px solid rgba(96, 211, 197, 0.34);
+      color: #d7efe9;
+    }
+
+    .codex-markdown a {
+      color: #9be7db;
+      text-decoration: underline;
+      text-decoration-color: rgba(155, 231, 219, 0.45);
+      text-underline-offset: 2px;
+    }
+
+    .codex-markdown code {
+      font-family: var(--mono);
+      font-size: 0.92em;
+      padding: 0.14em 0.34em;
+      border-radius: 7px;
+      background: rgba(4, 7, 8, 0.56);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+    }
+
+    .codex-markdown pre {
+      padding: 11px 12px;
+      border-radius: 12px;
+      background: rgba(4, 7, 8, 0.56);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      overflow: auto;
+    }
+
+    .codex-markdown pre code {
+      display: block;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      border-radius: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .codex-output {
+      margin: 10px 0 0;
+      padding: 10px 11px;
+      border-radius: 12px;
+      background: rgba(4, 7, 8, 0.5);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      color: #d8d2c6;
+      font-family: var(--mono);
+      font-size: 0.77rem;
+      line-height: 1.48;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .codex-inline-row {
+      padding: 3px 0;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .codex-inline-system {
+      padding: 0;
+      border: 0;
+      background: transparent;
+    }
+
+    .codex-inline-main {
+      min-width: 0;
+      flex: 1 1 auto;
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      flex-wrap: nowrap;
+    }
+
+    .codex-inline-main .chip {
+      flex: none;
+    }
+
+    .codex-inline-text {
+      min-width: 0;
+      flex: 1 1 auto;
+      color: var(--text);
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .codex-inline-right {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      flex: none;
+      color: var(--muted);
+    }
+
+    .codex-inline-chevron {
+      color: var(--memory);
+      font-size: 0.78rem;
+      line-height: 1;
+      transition: transform 120ms ease;
+    }
+
+    .codex-inline-system.open .codex-inline-chevron {
+      transform: rotate(90deg);
+    }
+
+    .codex-inline-system .codex-output {
+      margin-top: 8px;
+      margin-left: 18px;
+    }
+
+    .codex-inline-toggle {
+      appearance: none;
+      border: 0;
+      background: transparent;
+      box-shadow: none;
+      color: inherit;
+      padding: 0;
+      width: 18px;
+      height: 18px;
+      border-radius: 999px;
+      display: inline-grid;
+      place-items: center;
+      flex: none;
+      cursor: pointer;
+      transform: none;
+    }
+
+    .codex-inline-toggle:hover:enabled {
+      background: rgba(255, 255, 255, 0.06);
+      border-color: transparent;
+      transform: none;
+    }
+
+    .event-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .event-item {
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+    }
+
+    .event-time {
+      color: var(--muted);
+      font-size: 0.78rem;
+      margin-bottom: 5px;
+    }
+
+    .git-grid {
+      display: grid;
+      gap: 12px;
+    }
+
+    .repo-card {
+      padding: 14px;
+    }
+
+    .repo-summary {
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+
+    details {
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 14px;
+      padding: 10px 12px;
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    details summary {
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    .error-list,
+    .action-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .error-item,
+    .action-item,
+    .alert-item {
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+    }
+
+    .error-item {
+      border-left: 3px solid var(--stuck);
+    }
+
+    .action-item.ok {
+      border-left: 3px solid var(--done);
+    }
+
+    .action-item.bad {
+      border-left: 3px solid var(--stuck);
+    }
+
+    .alert-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .alert-item {
+      border-left: 3px solid var(--accent);
+    }
+
+    .footer {
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      font-size: 0.88rem;
+    }
+
+    .toast {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      min-width: 280px;
+      max-width: 480px;
+      padding: 14px 16px;
+      border-radius: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(9, 13, 14, 0.94);
+      box-shadow: var(--shadow);
+      opacity: 0;
+      transform: translateY(14px);
+      transition: opacity 160ms ease, transform 160ms ease;
+      pointer-events: none;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .toast.ok {
+      border-color: rgba(141, 229, 168, 0.35);
+    }
+
+    .toast.bad {
+      border-color: rgba(255, 103, 103, 0.35);
+    }
+
+    @media (max-width: 1380px) {
+      .main-grid,
+      .overview-grid,
+      .terminal-main,
+      .raw-grid,
+      .lower-grid,
+      .control-surface-meta {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .shell {
+        width: min(100% - 18px, 100%);
+      }
+      h1 {
+        font-size: 2.6rem;
+      }
+      .panel,
+      .hero-card {
+        padding: 16px;
+      }
+      .graph-wrap {
+        min-height: 420px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="panel metrics-panel">
+      <div class="panel-head">
+        <h2>Gas Town Control Surface</h2>
+        <div class="toolbar control-surface-toolbar">
+          <div class="live-pill" id="live-pill">
+            <span class="pulse"></span>
+            <span id="live-label">Booting</span>
+          </div>
+          <label class="filter-group" for="scope-select">
+            <span>Rig</span>
+            <select id="scope-select">
+              <option value="all">All</option>
+            </select>
+          </label>
+          <button id="refresh-button" type="button">Refresh now</button>
+        </div>
+      </div>
+      <div id="metrics"></div>
+      <div class="control-surface-meta">
+        <div class="surface-card">
+          <span class="surface-card-label">Town Root</span>
+          <div class="surface-card-value mono" id="gt-root">Loading...</div>
+        </div>
+        <div class="surface-card">
+          <span class="surface-card-label">Snapshot</span>
+          <div class="surface-card-value" id="snapshot-stamp">Waiting for data...</div>
+        </div>
+        <div class="surface-card">
+          <span class="surface-card-label">Services</span>
+          <div class="surface-card-value" id="service-stamp">Waiting for data...</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Primary Terminal</h2>
+        <div class="subtle" id="primary-terminal-summary"></div>
+      </div>
+      <div class="terminal-main" id="primary-terminal"></div>
+    </section>
+
+    <section class="main-grid">
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Task Spine</h2>
+            <div class="subtle">Tasks and commit memory nodes, with dependency and lineage edges.</div>
+          </div>
+          <div class="toolbar">
+            <label class="toggle">
+              <input id="hide-completed-convoys" type="checkbox" checked>
+              <span>Hide completed convoys</span>
+            </label>
+            <label class="toggle">
+              <input id="include-system" type="checkbox">
+              <span>Include system tasks</span>
+            </label>
+            <div class="subtle" id="graph-summary"></div>
+          </div>
+        </div>
+        <div class="graph-wrap">
+          <div class="graph-stage" id="graph-stage">
+            <svg class="graph-svg" id="graph-svg"></svg>
+            <div class="graph-nodes" id="graph-nodes"></div>
+          </div>
+        </div>
+        <div class="legend">
+          <span class="chip running">running</span>
+          <span class="chip stuck">stuck</span>
+          <span class="chip ready">ready</span>
+          <span class="chip done">done</span>
+          <span class="chip ice">deferred</span>
+          <span class="chip memory">git memory</span>
+        </div>
+      </section>
+
+      <aside class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Focus</h2>
+            <div class="subtle">Selected node details and intervention hooks.</div>
+          </div>
+        </div>
+        <div class="focus-stack" id="focus-panel"></div>
+      </aside>
+    </section>
+
+    <section class="panel section-gap">
+      <div class="panel-head">
+        <div>
+          <h2>Agents</h2>
+          <div class="subtle">Core rig and town agents, excluding polecats.</div>
+        </div>
+        <div class="subtle" id="agent-summary"></div>
+      </div>
+      <div class="roster-grid" id="agent-roster"></div>
+    </section>
+
+    <section class="lower-grid">
+      <section class="panel swarm-feed-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Swarm Feed</h2>
+            <div class="subtle">Grouped by currently hooked task, with pane logs when available.</div>
+          </div>
+          <div class="subtle" id="feed-summary"></div>
+        </div>
+        <div class="feed-list" id="feed-list"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Git Memory</h2>
+            <div class="subtle">Recent commits, branch/worktree state, and diff-on-demand.</div>
+          </div>
+          <div class="subtle" id="git-summary"></div>
+        </div>
+        <div class="git-grid" id="git-panel"></div>
+      </section>
+    </section>
+
+    <section class="overview-grid">
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Crew Workspaces</h2>
+            <div class="subtle">Crew repos, branches, and local state.</div>
+          </div>
+          <div class="subtle" id="crew-summary"></div>
+        </div>
+        <div class="stack" id="crew-panel"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Bead Stores</h2>
+            <div class="subtle">Authoritative per-store counts and availability.</div>
+          </div>
+          <div class="subtle" id="stores-summary"></div>
+        </div>
+        <div class="stack" id="stores-panel"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Statuses</h2>
+            <div class="subtle">Stored bead statuses and their meanings.</div>
+          </div>
+        </div>
+        <div class="stack" id="status-panel"></div>
+      </section>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Town Raw</h2>
+          <div class="subtle">Raw GT surfaces preserved for inspection.</div>
+        </div>
+      </div>
+      <div class="raw-grid">
+        <div class="card">
+          <h3>GT Status</h3>
+          <pre id="raw-status"></pre>
+        </div>
+        <div class="card">
+          <h3>GT Vitals</h3>
+          <pre id="raw-vitals"></pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="actions-panel">
+      <div class="panel-head">
+        <h2>Recent Actions</h2>
+        <div class="subtle">Local GTUI requests only.</div>
+      </div>
+      <div class="action-list" id="actions-list"></div>
+    </section>
+
+    <section class="panel" id="errors-panel" hidden>
+      <div class="panel-head">
+        <h2>Command Errors</h2>
+        <div class="subtle">Failed polls stay visible here until the next clean update.</div>
+      </div>
+      <div class="error-list" id="errors-list"></div>
+    </section>
+
+    <div class="footer">
+      <div id="footer-left">Polling every second.</div>
+      <div id="footer-right"></div>
+    </div>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const PRIMARY_TERMINAL_FETCH_TIMEOUT_MS = 6000;
+    const PRIMARY_SELECTION_FREEZE_MS = 2500;
+
+    const app = {
+      snapshot: null,
+      primaryTerminal: null,
+      primaryTerminalInFlight: false,
+      primaryTerminalAbortController: null,
+      primaryTerminalRequestId: 0,
+      primaryTerminalFetchStartedAt: 0,
+      primaryTerminalDataKey: "",
+      primaryTerminalRenderedKey: "",
+      primaryLogPinnedBottom: true,
+      primaryLogScrollTop: 0,
+      tmuxLogScrollStates: new Map(),
+      primaryPointerSelecting: false,
+      primarySelectionFrozen: false,
+      primarySelectionFreezeUntil: 0,
+      openDetails: new Set(),
+      graphPan: {
+        active: false,
+        pointerId: null,
+        startX: 0,
+        startY: 0,
+        startScrollLeft: 0,
+        startScrollTop: 0,
+        moved: false,
+        downNodeId: "",
+      },
+      suppressGraphClick: false,
+      selectedNodeId: null,
+      selectedScope: "all",
+      includeSystem: false,
+      hideCompletedConvoys: true,
+      primaryInjectDraft: "",
+      primarySending: false,
+      lastSuccessMs: 0,
+      inFlight: false,
+      diffCache: new Map(),
+      diffKey: "",
+      toastTimer: null,
+    };
+
+    const metricConfig = [
+      { key: "hooked_tasks", label: "Hooked", cls: "accent-running", sub: (v) => v ? "attached to live agent hooks" : "nothing currently hooked" },
+      { key: "in_progress_tasks", label: "In Progress", cls: "accent-running", sub: (v) => v ? "explicitly claimed tasks" : "no claimed tasks" },
+      { key: "blocked_tasks", label: "Blocked", cls: "accent-stuck", sub: (v) => v ? "blocked by dependencies" : "nothing blocked" },
+      { key: "open_tasks", label: "Open", cls: "accent-ready", sub: (v) => v ? "available/open tasks" : "no open tasks visible" },
+      { key: "closed_tasks", label: "Closed", cls: "accent-done", sub: (v) => v ? "completed tasks" : "no closed tasks visible" },
+      { key: "deferred_tasks", label: "Deferred", cls: "accent-ice", sub: (v) => v ? "deliberately on ice" : "nothing deferred" },
+      { key: "pinned_tasks", label: "Pinned", cls: "accent-ice", sub: (v) => v ? "persistent reference tasks" : "nothing pinned" },
+      { key: "active_agents", label: "Agents", cls: "accent-ready", sub: (v) => `${v} core live sessions visible` },
+      { key: "active_polecats", label: "Polecats", cls: "accent-memory", sub: (v) => `${v} worker cats visible` },
+      { key: "command_errors", label: "Errors", cls: "accent-stuck", sub: (v) => v ? "poll degraded" : "clean polling cycle" },
+    ];
+
+    function esc(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    function escapeAttr(value) {
+      return esc(value);
+    }
+
+    function sanitizeMarkdownHref(href) {
+      const value = String(href || "").trim();
+      if (!value) return "";
+      if (/^(https?:\/\/|mailto:|#)/i.test(value)) return value;
+      if (value.startsWith("/")) return value;
+      if (value.startsWith("./") || value.startsWith("../")) return value;
+      return "";
+    }
+
+    function renderInlineMarkdown(text) {
+      let html = esc(String(text ?? ""));
+      const placeholders = [];
+      html = html.replace(/`([^`]+)`/g, (_, code) => {
+        const token = `@@CODEX_MD_${placeholders.length}@@`;
+        placeholders.push(`<code>${code}</code>`);
+        return token;
+      });
+      html = html.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, href) => {
+        const safeHref = sanitizeMarkdownHref(href);
+        if (!safeHref) return `${label} (${href})`;
+        return `<a href="${escapeAttr(safeHref)}" target="_blank" rel="noreferrer">${label}</a>`;
+      });
+      html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      html = html.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+      html = html.replace(/~~([^~]+)~~/g, "<s>$1</s>");
+      html = html.replace(/(^|[\s(])\*([^*\n][^*\n]*?)\*(?=$|[\s).,!?:;])/g, "$1<em>$2</em>");
+      html = html.replace(/(^|[\s(])_([^_\n][^_\n]*?)_(?=$|[\s).,!?:;])/g, "$1<em>$2</em>");
+      placeholders.forEach((replacement, index) => {
+        html = html.replace(`@@CODEX_MD_${index}@@`, replacement);
+      });
+      return html.replace(/\n/g, "<br>");
+    }
+
+    function isMarkdownBlockBoundary(line) {
+      return /^\s*$/.test(line)
+        || /^```/.test(line)
+        || /^\s{0,3}#{1,6}\s+/.test(line)
+        || /^\s{0,3}>\s?/.test(line)
+        || /^\s{0,3}[-*+]\s+/.test(line)
+        || /^\s{0,3}\d+\.\s+/.test(line);
+    }
+
+    function renderMarkdown(text) {
+      const lines = String(text ?? "").replace(/\r\n?/g, "\n").split("\n");
+      const blocks = [];
+      let index = 0;
+
+      while (index < lines.length) {
+        const line = lines[index];
+        if (!line.trim()) {
+          index += 1;
+          continue;
+        }
+
+        const fenceMatch = line.match(/^```(\w+)?\s*$/);
+        if (fenceMatch) {
+          const language = fenceMatch[1] || "";
+          const codeLines = [];
+          index += 1;
+          while (index < lines.length && !/^```/.test(lines[index])) {
+            codeLines.push(lines[index]);
+            index += 1;
+          }
+          if (index < lines.length) index += 1;
+          blocks.push(`
+            <pre><code${language ? ` class="language-${esc(language)}"` : ""}>${esc(codeLines.join("\n"))}</code></pre>
+          `);
+          continue;
+        }
+
+        const headingMatch = line.match(/^\s{0,3}(#{1,6})\s+(.+)$/);
+        if (headingMatch) {
+          const level = headingMatch[1].length;
+          blocks.push(`<h${level}>${renderInlineMarkdown(headingMatch[2].trim())}</h${level}>`);
+          index += 1;
+          continue;
+        }
+
+        if (/^\s{0,3}>\s?/.test(line)) {
+          const quoteLines = [];
+          while (index < lines.length && /^\s{0,3}>\s?/.test(lines[index])) {
+            quoteLines.push(lines[index].replace(/^\s{0,3}>\s?/, ""));
+            index += 1;
+          }
+          blocks.push(`<blockquote>${renderMarkdown(quoteLines.join("\n"))}</blockquote>`);
+          continue;
+        }
+
+        const listMatch = line.match(/^\s{0,3}((?:[-*+])|(?:\d+\.))\s+(.+)$/);
+        if (listMatch) {
+          const ordered = /\d+\./.test(listMatch[1]);
+          const items = [];
+          while (index < lines.length) {
+            const current = lines[index];
+            const bulletMatch = current.match(/^\s{0,3}((?:[-*+])|(?:\d+\.))\s+(.+)$/);
+            if (!bulletMatch) break;
+            const itemLines = [bulletMatch[2]];
+            index += 1;
+            while (index < lines.length) {
+              const continuation = lines[index];
+              if (!continuation.trim()) {
+                index += 1;
+                break;
+              }
+              if (/^\s{0,3}((?:[-*+])|(?:\d+\.))\s+/.test(continuation) || isMarkdownBlockBoundary(continuation)) {
+                break;
+              }
+              itemLines.push(continuation.trim());
+              index += 1;
+            }
+            items.push(`<li>${renderInlineMarkdown(itemLines.join("\n"))}</li>`);
+          }
+          blocks.push(`<${ordered ? "ol" : "ul"}>${items.join("")}</${ordered ? "ol" : "ul"}>`);
+          continue;
+        }
+
+        const paragraphLines = [line];
+        index += 1;
+        while (index < lines.length && !isMarkdownBlockBoundary(lines[index])) {
+          paragraphLines.push(lines[index]);
+          index += 1;
+        }
+        blocks.push(`<p>${renderInlineMarkdown(paragraphLines.join("\n"))}</p>`);
+      }
+
+      if (!blocks.length) {
+        return `<div class="codex-text"></div>`;
+      }
+      return `<div class="codex-text codex-markdown">${blocks.join("")}</div>`;
+    }
+
+    function formatTime(value) {
+      if (!value) return "Unknown";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return value;
+      return new Intl.DateTimeFormat([], {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      }).format(date);
+    }
+
+    function timeAgo(value) {
+      if (!value) return "unknown";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return value;
+      const seconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
+      if (seconds < 2) return "just now";
+      if (seconds < 60) return `${seconds}s ago`;
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return `${minutes}m ago`;
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return `${hours}h ago`;
+      return `${Math.floor(hours / 24)}d ago`;
+    }
+
+    function nodeStatusOrder(status) {
+      return { running: 0, stuck: 1, ready: 2, ice: 3, done: 4, memory: 5 }[status] ?? 9;
+    }
+
+    function exactStatusTone(status) {
+      return {
+        hooked: "running",
+        in_progress: "running",
+        blocked: "stuck",
+        open: "ready",
+        closed: "done",
+        deferred: "ice",
+        pinned: "ice",
+      }[status] || "";
+    }
+
+    function nodeTone(node) {
+      if (!node) return "ready";
+      if (node.kind === "commit") return "memory";
+      return exactStatusTone(node.status) || "ready";
+    }
+
+    function normalizeScope(scope) {
+      if (!scope || scope === "all") return "";
+      if (scope === "town") return "hq";
+      return String(scope);
+    }
+
+    function matchesScope(scope) {
+      if (app.selectedScope === "all") return true;
+      return normalizeScope(scope) === app.selectedScope;
+    }
+
+    function syncScopeSelector() {
+      const select = document.getElementById("scope-select");
+      const scopes = new Set(["hq"]);
+      const snapshot = app.snapshot || {};
+      (snapshot.graph?.nodes || []).forEach((node) => {
+        const scope = normalizeScope(node.scope);
+        if (scope) scopes.add(scope);
+      });
+      (snapshot.agents || []).forEach((agent) => {
+        const scope = normalizeScope(agent.scope);
+        if (scope) scopes.add(scope);
+      });
+      (snapshot.crews || []).forEach((crew) => {
+        const scope = normalizeScope(crew.rig);
+        if (scope) scopes.add(scope);
+      });
+      (snapshot.stores || []).forEach((store) => {
+        const scope = normalizeScope(store.scope);
+        if (scope) scopes.add(scope);
+      });
+      (snapshot.git?.repos || []).forEach((repo) => {
+        (repo.scopes || [repo.scope]).forEach((scope) => {
+          const normalized = normalizeScope(scope);
+          if (normalized) scopes.add(normalized);
+        });
+      });
+
+      const options = ["all", ...[...scopes].sort((a, b) => {
+        if (a === "hq") return -1;
+        if (b === "hq") return 1;
+        return a.localeCompare(b);
+      })];
+      if (app.selectedScope !== "all" && !options.includes(app.selectedScope)) {
+        app.selectedScope = "all";
+      }
+      select.innerHTML = options.map((scope) => `
+        <option value="${esc(scope)}" ${scope === app.selectedScope ? "selected" : ""}>
+          ${esc(scope === "all" ? "All" : scope === "hq" ? "HQ" : scope)}
+        </option>
+      `).join("");
+    }
+
+    function visibleGraphNodes() {
+      const nodes = app.snapshot?.graph?.nodes || [];
+      const hiddenTasks = hiddenCompletedTaskIds();
+      return nodes.filter((node) => {
+        if (!matchesScope(node.scope)) return false;
+        if (!(app.includeSystem || !node.is_system)) return false;
+        if (node.kind === "task" && hiddenTasks.has(node.id)) return false;
+        if (node.kind === "commit" && node.parent && hiddenTasks.has(node.parent)) return false;
+        return true;
+      });
+    }
+
+    function visibleAgents(includePolecats = true) {
+      const agents = app.snapshot?.agents || [];
+      return agents.filter((agent) => {
+        if (!matchesScope(agent.scope)) return false;
+        if (!includePolecats && agent.role === "polecat") return false;
+        return true;
+      });
+    }
+
+    function visiblePolecats() {
+      return visibleAgents(true).filter((agent) => agent.role === "polecat");
+    }
+
+    function visibleFeedGroups() {
+      const groups = app.snapshot?.activity?.groups || [];
+      return groups.filter((group) => {
+        if (!matchesScope(group.scope)) return false;
+        return app.includeSystem || !group.is_system;
+      });
+    }
+
+    function visibleUnassignedAgents() {
+      const agents = app.snapshot?.activity?.unassigned_agents || [];
+      return agents.filter((agent) => matchesScope(agent.scope));
+    }
+
+    function visibleRepos() {
+      const repos = app.snapshot?.git?.repos || [];
+      return repos.filter((repo) => {
+        const scopes = (repo.scopes && repo.scopes.length) ? repo.scopes : [repo.scope];
+        return app.selectedScope === "all" || scopes.some((scope) => matchesScope(scope));
+      });
+    }
+
+    function hiddenCompletedTaskIds() {
+      if (!app.hideCompletedConvoys) return new Set();
+      const taskIndex = app.snapshot?.convoys?.task_index || {};
+      const hidden = new Set();
+      for (const [taskId, entry] of Object.entries(taskIndex)) {
+        if (!entry || typeof entry !== "object") continue;
+        if (entry.total > 0 && entry.open === 0) {
+          hidden.add(taskId);
+        }
+      }
+      for (const node of (app.snapshot?.graph?.nodes || [])) {
+        if (!node || node.kind !== "task") continue;
+        if (node.status !== "closed") continue;
+        const entry = taskIndex[node.id];
+        if (!entry || Number(entry.open || 0) === 0) {
+          hidden.add(node.id);
+        }
+      }
+      return hidden;
+    }
+
+    function filteredTaskNodes() {
+      return visibleGraphNodes().filter((node) => node.kind === "task" && !node.is_system);
+    }
+
+    function getFilteredSummary() {
+      const tasks = filteredTaskNodes();
+      const agents = visibleAgents(false);
+      const polecats = visiblePolecats();
+      return {
+        hooked_tasks: tasks.filter((node) => node.status === "hooked").length,
+        in_progress_tasks: tasks.filter((node) => node.status === "in_progress").length,
+        blocked_tasks: tasks.filter((node) => node.status === "blocked").length,
+        open_tasks: tasks.filter((node) => node.status === "open").length,
+        closed_tasks: tasks.filter((node) => node.status === "closed").length,
+        deferred_tasks: tasks.filter((node) => node.status === "deferred").length,
+        pinned_tasks: tasks.filter((node) => node.status === "pinned").length,
+        active_agents: agents.filter((agent) => agent.has_session).length,
+        active_polecats: polecats.filter((agent) => agent.has_session).length,
+        command_errors: app.snapshot?.errors?.length || 0,
+      };
+    }
+
+    function getNodeMap() {
+      const nodes = app.snapshot?.graph?.nodes || [];
+      return new Map(nodes.map((node) => [node.id, node]));
+    }
+
+    function getSelectedNode() {
+      const map = getNodeMap();
+      return map.get(app.selectedNodeId) || null;
+    }
+
+    function formatHookState(status) {
+      if (!status) return "unknown";
+      return String(status).replaceAll("_", " ");
+    }
+
+    function summarizeAgentChurn(agent) {
+      const lines = agent.log_lines || [];
+      for (let index = lines.length - 1; index >= 0; index -= 1) {
+        const line = String(lines[index] || "").trim();
+        if (!line) continue;
+        if (line.startsWith("›")) return line.replace(/^›\s*/, "");
+      }
+      for (let index = lines.length - 1; index >= 0; index -= 1) {
+        const line = String(lines[index] || "").trim();
+        if (!line) continue;
+        if (/^[A-Za-z0-9.-]+\s+·\s+\d+% left/.test(line)) continue;
+        return line;
+      }
+      const lastEvent = (agent.events || []).at(-1);
+      return lastEvent?.message || "";
+    }
+
+    function formatRosterSummary(roster, singularLabel, pluralLabel, labels = {}) {
+      const total = roster.length;
+      const attached = roster.filter((agent) => agent.taskId).length;
+      const idle = roster.filter((agent) => !agent.taskId && agent.has_session).length;
+      const noSession = Math.max(0, total - attached - idle);
+      const label = total === 1 ? singularLabel : pluralLabel;
+      const attachedLabel = labels.attached || "attached";
+      const idleLabel = labels.idle || "idle";
+      const noSessionLabel = labels.noSession || "no session";
+      const parts = [`${total} ${label}`, `${attached} ${attachedLabel}`, `${idle} ${idleLabel}`];
+      if (noSession) parts.push(`${noSession} ${noSessionLabel}`);
+      return parts.join(" · ");
+    }
+
+    function buildAgentRoster(roleFilter = "agent") {
+      const nodeMap = getNodeMap();
+      const source = roleFilter === "polecat" ? visiblePolecats() : visibleAgents(false);
+      return source.map((agent) => {
+        const hook = agent.hook || {};
+        const taskId = hook.bead_id || "";
+        const node = taskId ? nodeMap.get(taskId) : null;
+        const recentTask = agent.recent_task || null;
+        const fallbackTaskId = taskId ? "" : (recentTask?.task_id || "");
+        const fallbackNode = fallbackTaskId ? nodeMap.get(fallbackTaskId) : null;
+        const taskTitle = node?.title || hook.title || "";
+        const taskDerived = node?.ui_status || (taskId ? "running" : "");
+        const taskStored = taskId ? (node?.status || hook.status || "") : "";
+        const isSystem = Boolean(node?.is_system || (hook.title || "").startsWith("mol-"));
+        const lastEvent = (agent.events || []).at(-1) || null;
+        const churn = summarizeAgentChurn(agent);
+        return {
+          ...agent,
+          taskId,
+          taskTitle,
+          taskDerived,
+          taskStored,
+          isSystem,
+          fallbackTaskId,
+          fallbackTaskTitle: fallbackNode?.title || "",
+          recentTask,
+          lastEvent,
+          churn,
+        };
+      }).sort((a, b) => {
+        const aRank =
+          a.taskId ? 0 :
+          a.has_session ? 1 :
+          2;
+        const bRank =
+          b.taskId ? 0 :
+          b.has_session ? 1 :
+          2;
+        return aRank - bRank
+          || nodeStatusOrder(a.taskDerived || "")
+          - nodeStatusOrder(b.taskDerived || "")
+          || a.target.localeCompare(b.target);
+      });
+    }
+
+    function terminalRolePriority(role) {
+      if (app.selectedScope === "all" || app.selectedScope === "hq") {
+        return { mayor: 0, deacon: 1, witness: 2, refinery: 3, crew: 4, polecat: 5 }[role] ?? 9;
+      }
+      return { witness: 0, refinery: 1, crew: 2, mayor: 3, deacon: 4, polecat: 5 }[role] ?? 9;
+    }
+
+    function getPrimaryTerminalAgent() {
+      const preferred = visibleAgents(false);
+      const fallback = visiblePolecats();
+      const primaryPool = preferred.length ? preferred : fallback;
+      if (!primaryPool.length) return null;
+
+      const livePool = primaryPool.filter((agent) => agent.has_session || agent.log_lines?.length || agent.events?.length);
+      const candidates = livePool.length ? livePool : primaryPool;
+      return [...candidates].sort((a, b) => {
+        const aRank = terminalRolePriority(a.role);
+        const bRank = terminalRolePriority(b.role);
+        return aRank - bRank
+          || (b.has_session ? 1 : 0) - (a.has_session ? 1 : 0)
+          || (b.log_lines?.length || 0) - (a.log_lines?.length || 0)
+          || a.target.localeCompare(b.target);
+      })[0] || null;
+    }
+
+    function getPrimaryTerminalViewAgent() {
+      const agent = getPrimaryTerminalAgent();
+      if (!agent) return null;
+      const live = app.primaryTerminal;
+      if (!live || live.target !== agent.target) return agent;
+      return {
+        ...agent,
+        ...live,
+        hook: live.hook || agent.hook,
+        events: live.events || agent.events,
+        log_lines: live.log_lines?.length ? live.log_lines : (agent.log_lines || []),
+      };
+    }
+
+    function terminalHeading(agent) {
+      if (!agent) return "No primary terminal available";
+      if (agent.role === "mayor") return "Mayor Terminal";
+      if (agent.role === "deacon") return "Deacon Terminal";
+      if (agent.role === "witness") return `${agent.scope || "Rig"} Witness Terminal`;
+      if (agent.role === "refinery") return `${agent.scope || "Rig"} Refinery Terminal`;
+      if (agent.role === "crew") return `${agent.scope || "Rig"} Crew Terminal`;
+      if (agent.role === "polecat") return `${agent.scope || "Rig"} Polecat Terminal`;
+      return `${agent.target} Terminal`;
+    }
+
+    function primarySurfaceHeading(agent) {
+      if (!agent) return "No primary view available";
+      if (agent.render_mode === "codex") {
+        return terminalHeading(agent).replace("Terminal", "Codex");
+      }
+      return terminalHeading(agent);
+    }
+
+    function codexToolOutputKey(item) {
+      return `codex-tool-output:${item?.call_id || item?.timestamp || item?.summary || ""}`;
+    }
+
+    function buildPrimaryTerminalDataKey(agent) {
+      if (!agent) return "none";
+      const codexView = agent.codex_view || {};
+      const logLines = agent.log_lines || [];
+      const events = agent.events || [];
+      const lastLog = logLines.length ? String(logLines[logLines.length - 1] || "") : "";
+      const lastEvent = events.length
+        ? `${events[events.length - 1]?.time || ""}:${events[events.length - 1]?.message || events[events.length - 1]?.raw || ""}`
+        : "";
+      return [
+        agent.target || "",
+        agent.render_mode || "",
+        codexView.revision || "",
+        codexView.updated_at || "",
+        (codexView.items || []).length,
+        agent.capture_error || "",
+        logLines.length,
+        lastLog,
+        events.length,
+        lastEvent,
+        agent.hook?.bead_id || "",
+        agent.hook?.status || "",
+        agent.has_session ? "1" : "0",
+        agent.runtime_state || "",
+        agent.session_name || "",
+      ].join("||");
+    }
+
+    function normalizePrimaryFreezeState() {
+      if (app.primaryPointerSelecting && Date.now() >= app.primarySelectionFreezeUntil && !hasPrimaryLogSelection()) {
+        app.primaryPointerSelecting = false;
+      }
+    }
+
+    function hasPrimaryLogSelection() {
+      const log = document.getElementById("primary-terminal-log");
+      const selection = window.getSelection?.();
+      if (!log || !selection || selection.rangeCount === 0 || selection.isCollapsed) return false;
+      return log.contains(selection.anchorNode) || log.contains(selection.focusNode);
+    }
+
+    function capturePrimaryComposerState() {
+      const box = document.getElementById("primary-inject-message");
+      if (!box) return null;
+      return {
+        focused: document.activeElement === box,
+        selectionStart: box.selectionStart ?? box.value.length,
+        selectionEnd: box.selectionEnd ?? box.value.length,
+        scrollTop: box.scrollTop,
+      };
+    }
+
+    function restorePrimaryComposerState(state) {
+      if (!state?.focused) return;
+      const box = document.getElementById("primary-inject-message");
+      if (!box || box.disabled) return;
+      box.focus({ preventScroll: true });
+      const max = box.value.length;
+      const start = Math.max(0, Math.min(Number(state.selectionStart ?? max), max));
+      const end = Math.max(start, Math.min(Number(state.selectionEnd ?? max), max));
+      box.selectionStart = start;
+      box.selectionEnd = end;
+      box.scrollTop = Number(state.scrollTop ?? 0);
+    }
+
+    function shouldFreezePrimaryTerminal() {
+      normalizePrimaryFreezeState();
+      return (app.primaryPointerSelecting && hasPrimaryLogSelection())
+        || Date.now() < app.primarySelectionFreezeUntil;
+    }
+
+    function syncPrimarySelectionState() {
+      const nextFrozen = shouldFreezePrimaryTerminal();
+      const changed = nextFrozen !== app.primarySelectionFrozen;
+      app.primarySelectionFrozen = nextFrozen;
+      if (changed && !nextFrozen && !app.primarySending) {
+        renderPrimaryTerminal();
+      }
+    }
+
+    function renderCodexTranscriptItem(item) {
+      const kind = String(item?.kind || "");
+      const time = item?.time ? `<div class="codex-time">${esc(item.time)}</div>` : "";
+      if (kind === "user" || kind === "assistant") {
+        const phase = item?.phase ? `<span class="codex-phase">${esc(item.phase)}</span>` : "";
+        const messageBody = kind === "assistant"
+          ? renderMarkdown(item.text || "")
+          : `<div class="codex-text">${esc(item.text || "")}</div>`;
+        return `
+          <div class="codex-item ${esc(kind)}">
+            <div class="codex-head">
+              <div class="codex-head-left">
+                <span class="codex-role">${esc(kind)}</span>
+                ${phase}
+              </div>
+              ${time}
+            </div>
+            <div class="codex-bubble">
+              ${messageBody}
+            </div>
+          </div>
+        `;
+      }
+      if (kind === "tool_call") {
+        const tool = item?.tool || "tool";
+        const summary = item?.summary || tool;
+        return `
+          <div class="codex-item codex-inline-row">
+            <div class="codex-inline-main">
+              <span class="chip memory">${esc(tool)}</span>
+              <span class="codex-inline-text">${esc(summary)}</span>
+            </div>
+            <div class="codex-inline-right">
+              ${time}
+            </div>
+          </div>
+        `;
+      }
+      if (kind === "tool_output") {
+        const tool = item?.tool || "tool";
+        const summary = item?.summary || tool;
+        const outputKey = codexToolOutputKey(item);
+        const isOpen = app.openDetails.has(outputKey);
+        return `
+          <div class="codex-item codex-inline-system ${isOpen ? "open" : ""}">
+            <div class="codex-inline-row">
+              <div class="codex-inline-main">
+                <span class="chip memory">${esc(tool)}</span>
+                <span class="codex-inline-text">${esc(summary)}</span>
+              </div>
+              <div class="codex-inline-right">
+                ${time}
+                <button
+                  type="button"
+                  class="codex-inline-toggle"
+                  data-inline-toggle="${esc(outputKey)}"
+                  aria-expanded="${isOpen ? "true" : "false"}"
+                  aria-label="${isOpen ? "Collapse output" : "Expand output"}"
+                ><span class="codex-inline-chevron" aria-hidden="true">▸</span></button>
+              </div>
+            </div>
+            ${isOpen ? `<pre class="codex-output">${esc(item.text || "")}</pre>` : ""}
+          </div>
+        `;
+      }
+      if (kind === "reasoning") {
+        return `
+          <div class="codex-item codex-inline-row">
+            <div class="codex-inline-main">
+              <span class="chip ice">${esc(item.summary || "Thinking...")}</span>
+            </div>
+            <div class="codex-inline-right">
+              ${time}
+            </div>
+          </div>
+        `;
+      }
+      const summary = item?.summary || item?.event_type || "event";
+      return `
+        <div class="codex-item event">
+          <div class="codex-head">
+            <div class="codex-head-left">
+              <span class="codex-role">system</span>
+            </div>
+            ${time}
+          </div>
+          <div class="codex-bubble">
+            <div class="codex-event-text">${esc(summary)}</div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderPrimaryTranscript(codexView) {
+      const items = codexView?.items || [];
+      if (!items.length) {
+      return `
+        <div id="primary-terminal-log" class="primary-log-block codex-transcript" style="margin-top:12px;">
+          <div class="empty">No Codex transcript items are visible for this session yet.</div>
+        </div>
+      `;
+      }
+      return `
+        <div id="primary-terminal-log" class="primary-log-block codex-transcript" style="margin-top:12px;">
+          ${items.map((item) => renderCodexTranscriptItem(item)).join("")}
+        </div>
+      `;
+    }
+
+    function ensureSelection() {
+      const nodes = visibleGraphNodes();
+      if (!nodes.length) {
+        app.selectedNodeId = null;
+        return;
+      }
+      const map = new Set(nodes.map((node) => node.id));
+      if (app.selectedNodeId && map.has(app.selectedNodeId)) return;
+      const next =
+        nodes.find((node) => node.ui_status === "running" && node.kind === "task") ||
+        nodes.find((node) => node.ui_status === "stuck" && node.kind === "task") ||
+        nodes.find((node) => node.kind === "task") ||
+        nodes[0];
+      app.selectedNodeId = next.id;
+    }
+
+    function renderMetrics() {
+      const summary = getFilteredSummary();
+      const host = document.getElementById("metrics");
+      host.innerHTML = `
+        <div class="metrics-table-wrap">
+          <table class="metrics-table">
+            <tbody>
+              <tr>
+                ${metricConfig.map((item) => {
+                  const value = Number(summary?.[item.key] ?? 0);
+                  return `
+                    <td>
+                      <div class="metrics-table-label">${esc(item.label)}</div>
+                      <div class="metrics-table-value ${esc(item.cls)}">${esc(value)}</div>
+                      <div class="metrics-table-sub">${esc(item.sub(value))}</div>
+                    </td>
+                  `;
+                }).join("")}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    function initGraphPan() {
+      const wrap = document.querySelector(".graph-wrap");
+      if (!wrap || wrap.dataset.panReady === "1") return;
+      wrap.dataset.panReady = "1";
+
+      const endPan = (event) => {
+        const pan = app.graphPan;
+        if (!pan.active) return;
+        if (event && event.pointerId !== undefined && pan.pointerId !== null && event.pointerId !== pan.pointerId) return;
+        const shouldSelectNode = Boolean(event && event.type === "pointerup" && !pan.moved && pan.downNodeId);
+        const nodeId = pan.downNodeId;
+        if (pan.pointerId !== null && wrap.releasePointerCapture) {
+          try {
+            wrap.releasePointerCapture(pan.pointerId);
+          } catch {}
+        }
+        wrap.classList.remove("dragging");
+        pan.active = false;
+        pan.pointerId = null;
+        pan.startX = 0;
+        pan.startY = 0;
+        pan.startScrollLeft = 0;
+        pan.startScrollTop = 0;
+        pan.moved = false;
+        pan.downNodeId = "";
+        if (shouldSelectNode && nodeId) {
+          app.selectedNodeId = nodeId;
+          renderAll();
+        }
+      };
+
+      wrap.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0) return;
+        if (event.target.closest("summary, a, input, textarea, select, option")) return;
+        const pan = app.graphPan;
+        const nodeTarget = event.target.closest("[data-node-id]");
+        pan.active = true;
+        pan.pointerId = event.pointerId;
+        pan.startX = event.clientX;
+        pan.startY = event.clientY;
+        pan.startScrollLeft = wrap.scrollLeft;
+        pan.startScrollTop = wrap.scrollTop;
+        pan.moved = false;
+        pan.downNodeId = nodeTarget?.dataset.nodeId || "";
+        wrap.classList.add("dragging");
+        if (wrap.setPointerCapture) {
+          try {
+            wrap.setPointerCapture(event.pointerId);
+          } catch {}
+        }
+      });
+
+      wrap.addEventListener("pointermove", (event) => {
+        const pan = app.graphPan;
+        if (!pan.active || event.pointerId !== pan.pointerId) return;
+        const dx = event.clientX - pan.startX;
+        const dy = event.clientY - pan.startY;
+        if (!pan.moved && Math.hypot(dx, dy) > 4) {
+          pan.moved = true;
+        }
+        if (!pan.moved) return;
+        wrap.scrollLeft = pan.startScrollLeft - dx;
+        wrap.scrollTop = pan.startScrollTop - dy;
+        app.suppressGraphClick = true;
+      });
+
+      wrap.addEventListener("pointerup", endPan);
+      wrap.addEventListener("pointercancel", endPan);
+      wrap.addEventListener("lostpointercapture", endPan);
+    }
+
+    function capturePrimaryLogState() {
+      const log = document.getElementById("primary-terminal-log");
+      if (!log) return;
+      const maxScrollTop = Math.max(0, log.scrollHeight - log.clientHeight);
+      const pinnedBottom = maxScrollTop - log.scrollTop <= 8;
+      app.primaryLogPinnedBottom = pinnedBottom;
+      if (!pinnedBottom) {
+        app.primaryLogScrollTop = log.scrollTop;
+      }
+    }
+
+    function restorePrimaryLogState() {
+      const log = document.getElementById("primary-terminal-log");
+      if (!log) return;
+      if (app.primaryLogPinnedBottom) {
+        log.scrollTop = log.scrollHeight;
+        return;
+      }
+      const maxScrollTop = Math.max(0, log.scrollHeight - log.clientHeight);
+      log.scrollTop = Math.min(Math.max(0, app.primaryLogScrollTop || 0), maxScrollTop);
+    }
+
+    function captureTmuxLogStates(root = document) {
+      const logs = root?.querySelectorAll?.("[data-log-scroll-key]") || [];
+      logs.forEach((log) => {
+        const key = log.dataset.logScrollKey;
+        if (!key) return;
+        const maxScrollTop = Math.max(0, log.scrollHeight - log.clientHeight);
+        app.tmuxLogScrollStates.set(key, {
+          pinnedBottom: maxScrollTop - log.scrollTop <= 8,
+          offsetFromBottom: Math.max(0, maxScrollTop - log.scrollTop),
+          initialized: true,
+        });
+      });
+    }
+
+    function restoreTmuxLogStates(root = document) {
+      const logs = root?.querySelectorAll?.("[data-log-scroll-key]") || [];
+      logs.forEach((log) => {
+        const key = log.dataset.logScrollKey;
+        if (!key) return;
+        const state = app.tmuxLogScrollStates.get(key);
+        if (!state?.initialized) {
+          log.scrollTop = log.scrollHeight;
+          app.tmuxLogScrollStates.set(key, {
+            pinnedBottom: true,
+            offsetFromBottom: 0,
+            initialized: true,
+          });
+          return;
+        }
+        if (state.pinnedBottom) {
+          log.scrollTop = log.scrollHeight;
+          return;
+        }
+        const maxScrollTop = Math.max(0, log.scrollHeight - log.clientHeight);
+        log.scrollTop = Math.max(0, maxScrollTop - Number(state.offsetFromBottom || 0));
+      });
+    }
+
+    function renderPrimaryTerminal() {
+      const host = document.getElementById("primary-terminal");
+      const summaryHost = document.getElementById("primary-terminal-summary");
+      capturePrimaryLogState();
+      captureTmuxLogStates(host);
+      const composerState = capturePrimaryComposerState();
+      const agent = getPrimaryTerminalViewAgent();
+      const tmuxErrorText = String(app.primaryTerminal?.capture_error || "")
+        || String(((app.snapshot?.errors || []).find((error) => String(error.command || "").includes("tmux")) || {}).error || "");
+      const services = app.primaryTerminal?.services || app.snapshot?.status?.services || [];
+      const daemonDown = services.some((service) => service.includes("daemon (stopped)"));
+      const doltDown = services.some((service) => service.includes("dolt (stopped"));
+      const tmuxDown =
+        services.some((service) => service.includes("tmux") && (service.includes("PID 0") || service.includes("0 sessions")))
+        || tmuxErrorText.includes("no server running");
+      const scopeLabel = app.selectedScope === "all" ? "All" : (app.selectedScope === "hq" ? "HQ" : app.selectedScope);
+      const serviceNotes = [
+        daemonDown ? "daemon stopped" : "",
+        doltDown ? "dolt stopped" : "",
+        tmuxDown ? "tmux stopped" : "",
+      ].filter(Boolean);
+
+      if (!agent) {
+        app.primaryTerminalRenderedKey = `none::${scopeLabel}::${serviceNotes.join("|")}`;
+        summaryHost.textContent = `${scopeLabel} · no controller terminal visible${serviceNotes.length ? ` · ${serviceNotes.join(" · ")}` : ""}`;
+        host.innerHTML = `
+          <div class="empty">
+            No primary controller terminal is visible for the current scope.
+            ${tmuxDown ? ` GT tmux is currently stopped, so live pane capture is unavailable.` : ""}
+          </div>
+        `;
+        return;
+      }
+
+      const hookState = formatHookState(agent.hook?.status || "");
+      const codexView = agent.codex_view || {};
+      const usesCodexTranscript = Boolean(codexView.available && (codexView.items || []).length);
+      const terminalText = agent.log_lines?.length
+        ? agent.log_lines.join("\n")
+        : (tmuxDown
+            ? [
+                "Live terminal unavailable: GT tmux is currently stopped.",
+                serviceNotes.length ? `Service state: ${serviceNotes.join(" · ")}` : "",
+                "Bring the GT services back up, then refresh this page.",
+              ].filter(Boolean).join("\n")
+            : (tmuxErrorText
+                ? "Live terminal unavailable: tmux capture failed during this poll."
+                : "No pane log stream available for this terminal right now."));
+      const recentEvents = agent.events?.length
+        ? `<div class="event-list">${agent.events.slice(-6).map((event) => `
+            <div class="event-item">
+              <div class="event-time">${esc(event.time || "")}</div>
+              <div><strong>${esc(event.symbol || "·")}</strong> ${esc(event.message || event.raw || "")}</div>
+            </div>
+          `).join("")}</div>`
+        : `<div class="empty">${tmuxDown ? "No recent controller events while GT tmux is down." : "No recent GT events for this controller."}</div>`;
+      const polecats = buildAgentRoster("polecat");
+      const polecatSummary = formatRosterSummary(polecats, "polecat", "polecats", {
+        attached: "hooked",
+        idle: "idle",
+        noSession: "no session",
+      });
+      const polecatSurface = polecats.length
+        ? `
+            <div class="subtle">${esc(polecatSummary)}</div>
+            <div class="roster-grid terminal-roster-grid">${renderRosterCards(polecats)}</div>
+          `
+        : `
+            <div class="subtle">${esc(polecatSummary)}</div>
+            <div class="empty">No polecats visible for the current scope.</div>
+          `;
+      const alerts = app.snapshot?.alerts || [];
+      const alertsSurface = alerts.length
+        ? `
+            <div class="card">
+              <h3>Attention</h3>
+              <div class="subtle">High-signal conditions worth reading first.</div>
+              <div class="alert-list" style="margin-top: 12px;">${alerts.map((alert) => `<div class="alert-item">${esc(alert)}</div>`).join("")}</div>
+            </div>
+          `
+        : "";
+      app.primaryTerminalRenderedKey = buildPrimaryTerminalDataKey(agent);
+
+      summaryHost.textContent = `${agent.target} · ${agent.role} · ${usesCodexTranscript ? "Codex transcript" : "terminal"} · ${scopeLabel}${serviceNotes.length ? ` · ${serviceNotes.join(" · ")}` : ""}`;
+      host.innerHTML = `
+        <div class="terminal-shell">
+          <div class="card">
+            <div class="agent-top">
+              <div>
+                <div class="feed-title">${esc(primarySurfaceHeading(agent))}</div>
+                <div class="subtle">${esc(agent.target)} ${usesCodexTranscript && codexView.session_name ? `· ${esc(codexView.session_name)}` : (agent.session_name ? `· ${esc(agent.session_name)}` : "")}</div>
+              </div>
+              <div class="tiny-actions">
+                <button type="button" data-pause-agent="${esc(agent.target)}">Pause</button>
+                <button type="button" data-focus-primary-inject="${esc(agent.target)}">Write</button>
+              </div>
+            </div>
+            <div class="node-meta" style="margin-top: 12px;">
+              <span class="chip ${agent.has_session ? "running" : ""}">${agent.has_session ? "session live" : "no session"}</span>
+              <span class="chip ${esc(exactStatusTone(agent.hook?.status || ""))}">${esc(hookState || "no hook")}</span>
+              ${agent.current_command ? `<span class="chip">${esc(agent.current_command)}</span>` : ""}
+              ${agent.scope ? `<span class="chip">${esc(agent.scope)}</span>` : ""}
+              ${usesCodexTranscript ? `<span class="chip memory">codex ${(codexView.items || []).length} items</span>` : ""}
+              ${usesCodexTranscript && codexView.updated_at ? `<span class="chip">${esc(timeAgo(codexView.updated_at))}</span>` : ""}
+              ${agent.log_lines?.length && !usesCodexTranscript ? `<span class="chip">history ${esc(agent.log_lines.length)} lines</span>` : ""}
+            </div>
+            ${usesCodexTranscript
+              ? renderPrimaryTranscript(codexView)
+              : `<pre id="primary-terminal-log" class="log-block primary-log-block" style="margin-top:12px;">${esc(terminalText)}</pre>`}
+            <div class="stack" style="margin-top:12px;">
+              <label class="subtle" for="primary-inject-message">Write to ${esc(agent.target)}</label>
+              <textarea
+                id="primary-inject-message"
+                data-primary-target="${esc(agent.target)}"
+                placeholder="Write directly to this terminal target. Enter sends. Cmd/Ctrl+Enter adds a new line."
+                ${agent.has_session ? "" : "disabled"}
+              >${esc(app.primaryInjectDraft)}</textarea>
+              <div class="tiny-actions">
+                <button type="button" id="primary-inject-submit" data-primary-target="${esc(agent.target)}" ${(agent.has_session && !app.primarySending) ? "" : "disabled"}>${app.primarySending ? "Sending…" : "Send to terminal"}</button>
+              </div>
+            </div>
+          </div>
+          ${alertsSurface}
+        </div>
+        <div class="terminal-meta">
+          <div class="card">
+            <h3>Polecats</h3>
+            ${polecatSurface}
+          </div>
+          <div class="card">
+            <h3>Recent Events</h3>
+            ${recentEvents}
+          </div>
+        </div>
+      `;
+      restorePrimaryLogState();
+      restoreTmuxLogStates(host);
+      restorePrimaryComposerState(composerState);
+    }
+
+    function estimateNodeMetrics(nodes) {
+      const host = document.createElement("div");
+      host.style.position = "absolute";
+      host.style.left = "-100000px";
+      host.style.top = "0";
+      host.style.visibility = "hidden";
+      host.style.pointerEvents = "none";
+      host.style.zIndex = "-1";
+      document.body.appendChild(host);
+
+      const metrics = new Map();
+      for (const node of nodes) {
+        const el = document.createElement("div");
+        el.className = `node ${node.kind} ${nodeTone(node)}`;
+        el.style.left = "0";
+        el.style.top = "0";
+        el.style.position = "absolute";
+        el.style.transform = "none";
+        el.innerHTML = renderGraphNodeInner(node);
+        host.appendChild(el);
+        metrics.set(node.id, {
+          width: Math.ceil(el.getBoundingClientRect().width),
+          height: Math.ceil(el.getBoundingClientRect().height),
+        });
+      }
+      host.remove();
+      return metrics;
+    }
+
+    function renderGraphNodeInner(node) {
+      const statusCls = nodeTone(node);
+      const chips = [];
+      if (node.kind === "task") {
+        if (node.status) chips.push(`<span class="chip ${esc(exactStatusTone(node.status))}">${esc(node.status)}</span>`);
+        if (node.priority !== null && node.priority !== undefined) chips.push(`<span class="chip">P${esc(node.priority)}</span>`);
+        if (node.type) chips.push(`<span class="chip">${esc(node.type)}</span>`);
+        if (node.agent_targets?.length) chips.push(`<span class="chip">${esc(node.agent_targets.length)} agent${node.agent_targets.length === 1 ? "" : "s"}</span>`);
+        if (node.linked_commit_count) chips.push(`<span class="chip memory">${esc(node.linked_commit_count)} commit${node.linked_commit_count === 1 ? "" : "s"}</span>`);
+      } else {
+        chips.push(`<span class="chip memory">${esc(node.short_sha || "commit")}</span>`);
+        if (node.available_local) chips.push(`<span class="chip">local diff</span>`);
+      }
+
+      return `
+        <div class="node-top">
+          <div class="node-id">${esc(node.kind === "commit" ? (node.short_sha || node.id) : node.id)}</div>
+          <span class="status-dot ${esc(statusCls)}"></span>
+        </div>
+        <div class="node-title">${esc(node.kind === "commit" ? (node.branch ? `${node.short_sha} · ${node.branch}` : (node.short_sha || node.title)) : node.title)}</div>
+        <div class="node-meta">${chips.join("")}</div>
+      `;
+    }
+
+    function computeLayout(nodes, edges, metrics) {
+      const visibleIds = new Set(nodes.map((node) => node.id));
+      const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+      const outgoing = new Map();
+      const incoming = new Map();
+      const undirected = new Map();
+
+      for (const node of nodes) {
+        outgoing.set(node.id, []);
+        incoming.set(node.id, []);
+        undirected.set(node.id, []);
+      }
+
+      for (const edge of edges) {
+        if (!visibleIds.has(edge.source) || !visibleIds.has(edge.target)) continue;
+        outgoing.get(edge.source).push(edge);
+        incoming.get(edge.target).push(edge);
+        undirected.get(edge.source).push(edge.target);
+        undirected.get(edge.target).push(edge.source);
+      }
+
+      const visited = new Set();
+      const components = [];
+      for (const node of nodes) {
+        if (visited.has(node.id)) continue;
+        const queue = [node.id];
+        visited.add(node.id);
+        const ids = [];
+        while (queue.length) {
+          const current = queue.shift();
+          ids.push(current);
+          for (const next of undirected.get(current) || []) {
+            if (visited.has(next)) continue;
+            visited.add(next);
+            queue.push(next);
+          }
+        }
+        components.push(ids);
+      }
+
+      const positions = new Map();
+      let totalHeight = 0;
+      let maxWidth = 0;
+      const componentPadding = 56;
+      const nodeGap = 24;
+      const columnGap = 44;
+
+      const sortRankNodes = (rankIds, rank, ranks, currentPositions) => {
+        if (rank === 0) {
+          return [...rankIds].sort((a, b) => {
+            const na = nodeMap.get(a);
+            const nb = nodeMap.get(b);
+            return nodeStatusOrder(na.ui_status) - nodeStatusOrder(nb.ui_status) || a.localeCompare(b);
+          });
+        }
+        return [...rankIds].sort((a, b) => {
+          const aParents = (incoming.get(a) || []).map((edge) => edge.source).filter((id) => currentPositions.has(id));
+          const bParents = (incoming.get(b) || []).map((edge) => edge.source).filter((id) => currentPositions.has(id));
+          const aY = aParents.length ? aParents.reduce((sum, id) => sum + currentPositions.get(id).y, 0) / aParents.length : 0;
+          const bY = bParents.length ? bParents.reduce((sum, id) => sum + currentPositions.get(id).y, 0) / bParents.length : 0;
+          if (aY !== bY) return aY - bY;
+          const na = nodeMap.get(a);
+          const nb = nodeMap.get(b);
+          return nodeStatusOrder(na.ui_status) - nodeStatusOrder(nb.ui_status) || a.localeCompare(b);
+        });
+      };
+
+      for (const componentIds of components) {
+        const componentSet = new Set(componentIds);
+        const inDegree = new Map(componentIds.map((id) => [id, 0]));
+        const ranks = new Map(componentIds.map((id) => [id, 0]));
+        const queue = [];
+
+        for (const id of componentIds) {
+          const degree = (incoming.get(id) || []).filter((edge) => componentSet.has(edge.source)).length;
+          inDegree.set(id, degree);
+          if (degree === 0) queue.push(id);
+        }
+
+        queue.sort();
+        const topo = [];
+        while (queue.length) {
+          const current = queue.shift();
+          topo.push(current);
+          for (const edge of outgoing.get(current) || []) {
+            if (!componentSet.has(edge.target)) continue;
+            const step = edge.kind === "parent" ? 0.6 : 1;
+            ranks.set(edge.target, Math.max(ranks.get(edge.target) || 0, (ranks.get(current) || 0) + step));
+            const nextDegree = (inDegree.get(edge.target) || 0) - 1;
+            inDegree.set(edge.target, nextDegree);
+            if (nextDegree === 0) queue.push(edge.target);
+          }
+        }
+
+        if (topo.length < componentIds.length) {
+          for (const id of componentIds) {
+            if (!topo.includes(id)) topo.push(id);
+          }
+        }
+
+        const byRank = new Map();
+        for (const id of topo) {
+          const rank = Math.round((ranks.get(id) || 0) * 10) / 10;
+          if (!byRank.has(rank)) byRank.set(rank, []);
+          byRank.get(rank).push(id);
+        }
+
+        const sortedRanks = [...byRank.keys()].sort((a, b) => a - b);
+        const currentPositions = new Map();
+        let componentHeight = 0;
+        const rankWidths = sortedRanks.map((rank) => {
+          const ids = byRank.get(rank) || [];
+          return Math.max(...ids.map((id) => metrics.get(id)?.width || (nodeMap.get(id).kind === "commit" ? 176 : 244)));
+        });
+        const rankOffsets = [];
+        let currentX = 28;
+        rankWidths.forEach((width, index) => {
+          rankOffsets[index] = currentX;
+          currentX += width + columnGap;
+        });
+        for (const rank of sortedRanks) {
+          const ids = sortRankNodes(byRank.get(rank), rank, ranks, currentPositions);
+          let currentY = totalHeight + 28;
+          ids.forEach((id, index) => {
+            const node = nodeMap.get(id);
+            const width = metrics.get(id)?.width || (node.kind === "commit" ? 176 : 244);
+            const height = metrics.get(id)?.height || (node.kind === "commit" ? 58 : 92);
+            const x = rankOffsets[sortedRanks.indexOf(rank)];
+            const y = currentY;
+            currentPositions.set(id, { x, y, width, height });
+            positions.set(id, { x, y, width, height });
+            currentY += height + nodeGap;
+            componentHeight = Math.max(componentHeight, y - totalHeight + height + 28);
+            maxWidth = Math.max(maxWidth, x + width + 40);
+          });
+        }
+
+        totalHeight += componentHeight + componentPadding;
+      }
+
+      return {
+        positions,
+        width: Math.max(maxWidth, 900),
+        height: Math.max(totalHeight, 540),
+      };
+    }
+
+    function renderGraph() {
+      const nodes = visibleGraphNodes();
+      const edges = app.snapshot?.graph?.edges || [];
+      const graphSummary = document.getElementById("graph-summary");
+      const hiddenCompletedTasks = hiddenCompletedTaskIds();
+      graphSummary.textContent = app.hideCompletedConvoys && hiddenCompletedTasks.size
+        ? `${nodes.length} visible nodes · ${hiddenCompletedTasks.size} completed task${hiddenCompletedTasks.size === 1 ? "" : "s"} hidden`
+        : `${nodes.length} visible nodes`;
+
+      const stage = document.getElementById("graph-stage");
+      const svg = document.getElementById("graph-svg");
+      const nodesHost = document.getElementById("graph-nodes");
+
+      if (!nodes.length) {
+        stage.style.width = "100%";
+        stage.style.height = "560px";
+        svg.innerHTML = "";
+        nodesHost.innerHTML = `<div class="empty" style="margin: 18px;">No graph nodes match the current filter.</div>`;
+        return;
+      }
+
+      const metrics = estimateNodeMetrics(nodes);
+      const { positions, width, height } = computeLayout(nodes, edges, metrics);
+      stage.style.width = `${width}px`;
+      stage.style.height = `${height}px`;
+      svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+      svg.setAttribute("width", width);
+      svg.setAttribute("height", height);
+
+      const selected = app.selectedNodeId;
+      const neighbors = new Set();
+      for (const edge of edges) {
+        if (edge.source === selected) neighbors.add(edge.target);
+        if (edge.target === selected) neighbors.add(edge.source);
+      }
+
+      svg.innerHTML = edges
+        .filter((edge) => positions.has(edge.source) && positions.has(edge.target))
+        .map((edge) => {
+          const source = positions.get(edge.source);
+          const target = positions.get(edge.target);
+          const startX = source.x + source.width;
+          const startY = source.y + source.height / 2;
+          const endX = target.x;
+          const endY = target.y + target.height / 2;
+          const delta = Math.max(60, (endX - startX) * 0.45);
+          const path = `M ${startX} ${startY} C ${startX + delta} ${startY}, ${endX - delta} ${endY}, ${endX} ${endY}`;
+          const active = edge.source === selected || edge.target === selected;
+          const muted = selected && !active;
+          return `<path class="graph-edge ${esc(edge.kind)} ${active ? "active" : ""} ${muted ? "muted" : ""}" d="${path}"></path>`;
+        })
+        .join("");
+
+      nodesHost.innerHTML = nodes.map((node) => {
+        const pos = positions.get(node.id);
+        const statusCls = nodeTone(node);
+        const selectedCls = node.id === selected ? "selected" : "";
+        const mutedCls = selected && node.id !== selected && !neighbors.has(node.id) ? "muted" : "";
+        return `
+          <button
+            type="button"
+            class="node ${esc(node.kind)} ${esc(statusCls)} ${selectedCls} ${mutedCls}"
+            style="left:${pos.x}px; top:${pos.y}px; width:${pos.width}px;"
+            data-node-id="${esc(node.id)}"
+          >
+            ${renderGraphNodeInner(node)}
+          </button>
+        `;
+      }).join("");
+    }
+
+    function renderFocus() {
+      const host = document.getElementById("focus-panel");
+      const node = getSelectedNode();
+      if (!node) {
+        host.innerHTML = `<div class="empty">Select a graph node to inspect task state, memory, and controls.</div>`;
+        return;
+      }
+
+      const isTask = node.kind === "task";
+      const taskId = isTask ? node.id : node.parent;
+      const taskMemory = app.snapshot?.git?.task_memory?.[taskId] || [];
+      const scopedAgents = visibleAgents(true);
+      const agents = (node.agent_targets || [])
+        .map((target) => scopedAgents.find((agent) => agent.target === target))
+        .filter(Boolean);
+      const selectedAgents = agents.length
+        ? agents
+        : (node.kind === "commit" ? [] : []);
+      const canRetry = isTask && !node.is_system && (node.status === "hooked" || node.status === "in_progress" || node.ui_status === "running");
+      const defaultTarget = selectedAgents[0]?.target || "";
+      const globalTargets = scopedAgents.filter((agent) => agent.has_session).map((agent) => agent.target);
+      const targetOptions = [...new Set([defaultTarget, ...globalTargets].filter(Boolean))];
+
+      const memoryRows = taskMemory.length
+        ? taskMemory.slice(0, 8).map((entry) => `
+            <div class="memory-row">
+              <div class="memory-top">
+                <div>
+                  <div><strong>${esc(entry.short_sha || "memory")}</strong> ${entry.branch ? `· ${esc(entry.branch)}` : ""}</div>
+                  <div class="subtle">${esc(entry.source)} ${entry.repo_label ? `· ${entry.repo_label}` : ""}</div>
+                </div>
+                ${entry.repo_id ? `<button type="button" data-diff-repo="${esc(entry.repo_id)}" data-diff-sha="${esc(entry.sha)}">Load diff</button>` : ""}
+              </div>
+              <div>${esc(entry.subject || "(no subject)")}</div>
+            </div>
+          `).join("")
+        : `<div class="empty">No task-linked git memory yet.</div>`;
+
+      const agentRows = selectedAgents.length
+        ? selectedAgents.map((agent) => `
+            <div class="agent-row">
+              <div class="agent-top">
+                <div>
+                  <div><strong>${esc(agent.target)}</strong></div>
+                  <div class="subtle">${esc(agent.role)} · ${esc(agent.kind)} ${agent.session_name ? `· ${esc(agent.session_name)}` : ""}</div>
+                </div>
+                <div class="tiny-actions">
+                  <button type="button" data-pause-agent="${esc(agent.target)}">Pause</button>
+                  <button type="button" data-select-target="${esc(agent.target)}">Inject</button>
+                </div>
+              </div>
+              <div class="subtle mono">${esc(agent.current_path || "")}</div>
+            </div>
+          `).join("")
+        : `<div class="empty">No hooked agents on this node.</div>`;
+
+      const detailRows = [
+        `<span class="chip ${esc(exactStatusTone(node.status))}">${esc(node.status || "unknown")}</span>`,
+        node.type ? `<span class="chip">${esc(node.type)}</span>` : "",
+        node.scope ? `<span class="chip">${esc(node.scope)}</span>` : "",
+        node.priority !== null && node.priority !== undefined ? `<span class="chip">P${esc(node.priority)}</span>` : "",
+        node.assignee ? `<span class="chip">${esc(node.assignee)}</span>` : "",
+        node.linked_commit_count ? `<span class="chip memory">${esc(node.linked_commit_count)} linked commits</span>` : "",
+      ].filter(Boolean).join("");
+
+      host.innerHTML = `
+        <div class="card">
+          <h3>${esc(node.kind === "commit" ? "Commit Focus" : "Task Focus")}</h3>
+          <div class="focus-title">${esc(node.title)}</div>
+          <div class="subtle mono" style="margin-top:8px;">${esc(node.kind === "commit" ? node.id : node.id)}</div>
+          <div class="node-meta" style="margin-top:12px;">${detailRows}</div>
+        </div>
+
+        <div class="card">
+          <h3>Description</h3>
+          <div class="focus-description">${esc(node.description || "No description recorded.")}</div>
+        </div>
+
+        <div class="card">
+          <h3>Intervention</h3>
+          <div class="stack">
+            <button type="button" data-retry-task="${esc(node.id)}" ${canRetry ? "" : "disabled"}>Retry task</button>
+            <div class="subtle">${canRetry ? "Uses safe reset primitives only." : "Retry is enabled only for non-system running tasks."}</div>
+            <div class="stack">
+              <label class="subtle" for="inject-target">Inject target</label>
+              <select id="inject-target">
+                ${targetOptions.length
+                  ? targetOptions.map((target) => `<option value="${esc(target)}" ${target === defaultTarget ? "selected" : ""}>${esc(target)}</option>`).join("")
+                  : `<option value="">No live agent available</option>`}
+              </select>
+              <textarea id="inject-message" placeholder="Inject instruction to the selected agent."></textarea>
+              <div class="tiny-actions">
+                <button type="button" data-pause-target="${esc(defaultTarget)}" ${defaultTarget ? "" : "disabled"}>Pause selected agent</button>
+                <button type="button" id="inject-submit" ${targetOptions.length ? "" : "disabled"}>Send instruction</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Hooked Agents</h3>
+          <div class="stack">${agentRows}</div>
+        </div>
+
+        <div class="card">
+          <h3>Task Memory</h3>
+          <div class="stack">${memoryRows}</div>
+        </div>
+      `;
+    }
+
+    function renderFeed() {
+      const host = document.getElementById("feed-list");
+      captureTmuxLogStates(host);
+      const groups = visibleFeedGroups();
+      const unassigned = visibleUnassignedAgents();
+      const totalSections = groups.length + (unassigned.length ? 1 : 0);
+      host.classList.toggle("single-feed-group", totalSections === 1);
+      document.getElementById("feed-summary").textContent = `${groups.length} task groups`;
+
+      if (!groups.length && !unassigned.length) {
+        host.innerHTML = `<div class="empty">No grouped activity yet.</div>`;
+        return;
+      }
+
+      const groupCards = groups.map((group) => {
+        const agentsHtml = group.agents.map((agent) => {
+          const eventList = agent.events?.length
+            ? `<div class="event-list">${agent.events.map((event) => `
+                <div class="event-item">
+                  <div class="event-time">${esc(event.time || "")}</div>
+                  <div><strong>${esc(event.symbol || "·")}</strong> ${esc(event.message || event.raw || "")}</div>
+                </div>
+              `).join("")}</div>`
+            : `<div class="empty">No recent GT events for this agent.</div>`;
+
+          const logBlock = agent.log_lines?.length
+            ? `<pre class="log-block feed-log-block" data-log-scroll-key="${esc(`feed:${agent.target}`)}">${esc(agent.log_lines.join("\n"))}</pre>`
+            : `<div class="empty">No pane log stream available for this agent.</div>`;
+
+          return `
+            <article class="feed-card">
+              <div class="agent-top">
+                <div>
+                  <div class="feed-title">${esc(agent.target)}</div>
+                  <div class="subtle">${esc(agent.role)} · ${esc(agent.kind)} ${agent.session_name ? `· ${esc(agent.session_name)}` : ""}</div>
+                </div>
+                <div class="tiny-actions">
+                  <button type="button" data-pause-agent="${esc(agent.target)}">Pause</button>
+                  <button type="button" data-select-target="${esc(agent.target)}">Inject</button>
+                </div>
+              </div>
+              <div class="subtle mono">${esc(agent.current_path || "")}</div>
+              <div class="stack">
+                ${logBlock}
+                ${eventList}
+              </div>
+            </article>
+          `;
+        }).join("");
+
+        return `
+          <section class="group-card">
+            <div class="group-header">
+              <div class="group-top">
+                <div>
+                  <div class="feed-title">${esc(group.title)}</div>
+                  <div class="subtle mono">${esc(group.task_id)}</div>
+                </div>
+                <div class="node-meta">
+                  <span class="chip ${esc(exactStatusTone(group.stored_status))}">${esc(group.stored_status || "unknown")}</span>
+                </div>
+              </div>
+              <div class="node-meta">
+                <span class="chip">${esc(group.agent_count)} agent${group.agent_count === 1 ? "" : "s"}</span>
+                ${group.memory?.length ? `<span class="chip memory">${esc(group.memory.length)} memory link${group.memory.length === 1 ? "" : "s"}</span>` : ""}
+                ${group.is_system ? `<span class="chip">system</span>` : ""}
+              </div>
+            </div>
+            <div class="agent-grid ${group.agents.length === 1 ? "single-agent" : ""}">${agentsHtml}</div>
+          </section>
+        `;
+      }).join("");
+
+      const unassignedHtml = unassigned.length
+        ? `
+          <section class="group-card">
+            <div class="group-header">
+              <div class="group-top">
+                <div>
+                  <div class="feed-title">Unassigned Agents</div>
+                  <div class="subtle">Live agents with no hooked task in snapshot.</div>
+                </div>
+              </div>
+            </div>
+            <div class="agent-grid">
+              ${unassigned.map((agent) => `
+                <article class="feed-card">
+                  <div class="agent-top">
+                    <div>
+                      <div class="feed-title">${esc(agent.target)}</div>
+                      <div class="subtle">${esc(agent.role)} · ${esc(agent.kind)}</div>
+                    </div>
+                    <div class="tiny-actions">
+                      <button type="button" data-pause-agent="${esc(agent.target)}">Pause</button>
+                      <button type="button" data-select-target="${esc(agent.target)}">Inject</button>
+                    </div>
+                  </div>
+                  <div class="subtle mono">${esc(agent.current_path || "")}</div>
+                </article>
+              `).join("")}
+            </div>
+          </section>
+        `
+        : "";
+
+      host.innerHTML = groupCards + unassignedHtml;
+      restoreTmuxLogStates(host);
+    }
+
+    function renderRosterCards(roster) {
+      return roster.map((agent) => {
+        const isPolecat = agent.role === "polecat";
+        const runtimeState = String(agent.runtime_state || "").trim();
+        const hookState = formatHookState(agent.hook?.status || "");
+        const hookTone = exactStatusTone(agent.taskStored || "") || exactStatusTone(agent.hook?.status || "") || "";
+        const churn = agent.churn || (agent.has_session ? "Session is live but there is no readable churn line yet." : "No live session visible.");
+        const eventSummary = agent.lastEvent
+          ? `${agent.lastEvent.time || ""} ${agent.lastEvent.symbol || "·"} ${agent.lastEvent.message || agent.lastEvent.raw || ""}`.trim()
+          : "";
+        const presenceLabel = isPolecat
+          ? (runtimeState || (agent.has_session ? "session live" : "no session"))
+          : (agent.has_session ? "session live" : "no session");
+        const presenceClass = isPolecat
+          ? ({
+              working: "running",
+              stuck: "stuck",
+              done: "done",
+              idle: "",
+            }[runtimeState] || (agent.has_session ? "running" : ""))
+          : (agent.has_session ? "running" : "");
+        const displayTaskLabel = agent.taskId ? "Current Task" : (agent.fallbackTaskId ? "Latest Task" : "Current Task");
+        const displayTaskTitle = agent.taskTitle || agent.fallbackTaskTitle || "No hooked task";
+        const displayTaskMeta = agent.taskId || agent.fallbackTaskId || agent.current_path || "";
+        const inferredChip = !agent.taskId && agent.fallbackTaskId && agent.recentTask
+          ? `<span class="chip">${esc(agent.recentTask.kind === "done" ? "last done" : "last assigned")} ${esc(agent.fallbackTaskId)}</span>`
+          : "";
+        const inferredNote = !agent.taskId && agent.fallbackTaskId && agent.recentTask
+          ? `<div class="subtle">Hook is empty; latest task inferred from feed history.</div>`
+          : "";
+        const logTailKey = `${agent.target}::log-tail`;
+        const logScrollKey = `roster:${agent.target}`;
+        const eventTailKey = `${agent.target}::event-tail`;
+        const logTail = agent.log_lines?.length
+          ? `<details data-preserve-open-key="${esc(logTailKey)}" ${app.openDetails.has(logTailKey) ? "open" : ""}><summary>Pane Tail</summary><pre class="log-block feed-log-block" data-log-scroll-key="${esc(logScrollKey)}">${esc(agent.log_lines.join("\n"))}</pre></details>`
+          : "";
+        const eventTail = agent.events?.length
+          ? `<details data-preserve-open-key="${esc(eventTailKey)}" ${app.openDetails.has(eventTailKey) ? "open" : ""}><summary>Recent Events</summary><div class="event-list">${agent.events.map((event) => `
+                <div class="event-item">
+                  <div class="event-time">${esc(event.time || "")}</div>
+                  <div><strong>${esc(event.symbol || "·")}</strong> ${esc(event.message || event.raw || "")}</div>
+                </div>
+              `).join("")}</div></details>`
+          : "";
+
+        return `
+          <article class="group-card roster-card">
+            <div class="roster-main">
+              <div class="agent-top">
+                <div>
+                  <div class="feed-title">${esc(agent.target)}</div>
+                  <div class="subtle">${esc(agent.role)} · ${esc(agent.kind)} ${agent.session_name ? `· ${esc(agent.session_name)}` : ""}</div>
+                </div>
+                <div class="tiny-actions">
+                  <button type="button" data-pause-agent="${esc(agent.target)}">Pause</button>
+                  <button type="button" data-select-target="${esc(agent.target)}">Inject</button>
+                </div>
+              </div>
+
+              <div class="node-meta">
+                <span class="chip ${esc(presenceClass)}">${esc(presenceLabel)}</span>
+                <span class="chip ${esc(hookTone)}">${esc(hookState || "no hook")}</span>
+                ${agent.current_command ? `<span class="chip">${esc(agent.current_command)}</span>` : ""}
+                ${agent.scope ? `<span class="chip">${esc(agent.scope)}</span>` : ""}
+              </div>
+
+              <div class="roster-task">
+                <div class="roster-churn-label">${esc(displayTaskLabel)}</div>
+                <div class="roster-task-title">${esc(displayTaskTitle)}</div>
+                <div class="subtle mono">${esc(displayTaskMeta)}</div>
+                <div class="node-meta">
+                  ${agent.taskStored ? `<span class="chip ${esc(exactStatusTone(agent.taskStored))}">${esc(agent.taskStored)}</span>` : ""}
+                  ${inferredChip}
+                  ${agent.isSystem ? `<span class="chip">system</span>` : ""}
+                </div>
+                ${inferredNote}
+              </div>
+
+              ${isPolecat ? "" : `
+                <div class="roster-churn">
+                  <div class="roster-churn-label">Current Churn</div>
+                  <div class="roster-churn-text">${esc(churn)}</div>
+                  ${eventSummary ? `<div class="subtle">${esc(eventSummary)}</div>` : ""}
+                </div>
+              `}
+
+              <div class="subtle mono">${esc(agent.current_path || "")}</div>
+              ${logTail}
+              ${eventTail}
+            </div>
+          </article>
+        `;
+      }).join("");
+    }
+
+    function renderAgentRoster() {
+      const host = document.getElementById("agent-roster");
+      captureTmuxLogStates(host);
+      const roster = buildAgentRoster("agent");
+      document.getElementById("agent-summary").textContent =
+        formatRosterSummary(roster, "agent surface", "agent surfaces", {
+          attached: "task-attached",
+          idle: "live-unattached",
+          noSession: "no session",
+        });
+
+      if (!roster.length) {
+        host.innerHTML = `<div class="empty">No visible agents detected in the current snapshot.</div>`;
+        return;
+      }
+
+      host.innerHTML = renderRosterCards(roster);
+      restoreTmuxLogStates(host);
+    }
+
+    function renderGit() {
+      const host = document.getElementById("git-panel");
+      const git = app.snapshot?.git || {};
+      const repos = visibleRepos();
+      const visibleRepoIds = new Set(repos.map((repo) => repo.id));
+      const recent = (git.recent_commits || []).filter((commit) => visibleRepoIds.has(commit.repo_id));
+      document.getElementById("git-summary").textContent = `${repos.length} repo surfaces`;
+
+      const selected = getSelectedNode();
+      const taskId = selected?.kind === "task" ? selected.id : selected?.parent;
+      const taskMemory = taskId ? (git.task_memory?.[taskId] || []) : [];
+
+      const memoryBlock = `
+        <div class="card">
+          <h3>Selected Task Memory</h3>
+          <div class="stack">
+            ${taskId
+              ? (taskMemory.length
+                  ? taskMemory.slice(0, 8).map((entry) => `
+                      <div class="memory-row">
+                        <div class="memory-top">
+                          <div>
+                            <div><strong>${esc(entry.short_sha || "memory")}</strong> ${entry.branch ? `· ${esc(entry.branch)}` : ""}</div>
+                            <div class="subtle">${esc(entry.source)} ${entry.repo_label ? `· ${esc(entry.repo_label)}` : ""}</div>
+                          </div>
+                          ${entry.repo_id ? `<button type="button" data-diff-repo="${esc(entry.repo_id)}" data-diff-sha="${esc(entry.sha)}">Load diff</button>` : ""}
+                        </div>
+                        <div>${esc(entry.subject || "(no subject)")}</div>
+                      </div>
+                    `).join("")
+                  : `<div class="empty">No commit lineage or merge memory attached to ${esc(taskId)}.</div>`)
+              : `<div class="empty">Select a task or commit node to inspect task-linked git memory.</div>`}
+          </div>
+        </div>
+      `;
+
+      const recentBlock = `
+        <div class="card">
+          <h3>Recent Commits</h3>
+          <div class="stack">
+            ${recent.length
+              ? recent.slice(0, 12).map((commit) => `
+                  <div class="commit-row">
+                    <div class="commit-top">
+                      <div>
+                        <div><strong>${esc(commit.short_sha)}</strong> · ${esc(commit.subject)}</div>
+                        <div class="subtle">${esc(commit.repo_label)} · ${esc(timeAgo(commit.committed_at))}</div>
+                      </div>
+                      <button type="button" data-diff-repo="${esc(commit.repo_id)}" data-diff-sha="${esc(commit.sha)}">Load diff</button>
+                    </div>
+                    <div class="node-meta">
+                      ${commit.task_ids?.length ? commit.task_ids.map((taskId) => `<span class="chip memory">${esc(taskId)}</span>`).join("") : `<span class="chip">no task id in subject</span>`}
+                    </div>
+                  </div>
+                `).join("")
+              : `<div class="empty">No recent commits visible.</div>`}
+          </div>
+        </div>
+      `;
+
+      const repoBlock = `
+        <div class="card">
+          <h3>Branches & Worktrees</h3>
+          <div class="stack">
+            ${repos.length
+              ? repos.map((repo) => `
+                  <article class="repo-card">
+                    <div class="group-top">
+                      <div>
+                        <div><strong>${esc(repo.label)}</strong></div>
+                        <div class="repo-summary mono">${esc(repo.root)}</div>
+                      </div>
+                      <div class="node-meta">
+                        <span class="chip ${repo.status?.dirty ? "stuck" : "done"}">${repo.status?.dirty ? "dirty" : "clean"}</span>
+                        <span class="chip">${esc(repo.status?.branch || "unknown branch")}</span>
+                      </div>
+                    </div>
+                    <details>
+                      <summary>Branches (${esc(repo.branches?.length || 0)})</summary>
+                      <div class="stack" style="margin-top: 10px;">
+                        ${(repo.branches || []).map((branch) => `
+                          <div class="memory-row">
+                            <div class="memory-top">
+                              <div><strong>${branch.current ? "* " : ""}${esc(branch.name)}</strong></div>
+                              <div class="subtle">${esc(timeAgo(branch.committed_at))}</div>
+                            </div>
+                            <div class="subtle mono">${esc(branch.short_sha)}</div>
+                            <div>${esc(branch.subject || "")}</div>
+                          </div>
+                        `).join("") || `<div class="empty">No branch data.</div>`}
+                      </div>
+                    </details>
+                    <details style="margin-top: 10px;">
+                      <summary>Worktrees (${esc(repo.worktrees?.length || 0)})</summary>
+                      <div class="stack" style="margin-top: 10px;">
+                        ${(repo.worktrees || []).map((worktree) => `
+                          <div class="memory-row">
+                            <div><strong>${esc(worktree.branch || "(detached)")}</strong></div>
+                            <div class="subtle mono">${esc(worktree.path)}</div>
+                          </div>
+                        `).join("") || `<div class="empty">No worktree data.</div>`}
+                      </div>
+                    </details>
+                  </article>
+                `).join("")
+              : `<div class="empty">No repo data available.</div>`}
+          </div>
+        </div>
+      `;
+
+      const diffText = app.diffCache.get(app.diffKey) || "Select a commit or memory row and load a diff.";
+      const diffBlock = `
+        <div class="card">
+          <h3>Diff Viewer</h3>
+          <pre>${esc(diffText)}</pre>
+        </div>
+      `;
+
+      host.innerHTML = memoryBlock + recentBlock + repoBlock + diffBlock;
+    }
+
+    function renderActions(actions) {
+      const host = document.getElementById("actions-list");
+      if (!actions || !actions.length) {
+        host.innerHTML = `<div class="empty">No GTUI actions have been sent from this page yet.</div>`;
+        return;
+      }
+      host.innerHTML = actions.map((action) => `
+        <div class="action-item ${action.ok ? "ok" : "bad"}">
+          <div class="group-top">
+            <div><strong>${esc(action.kind)}</strong></div>
+            <div class="subtle">${esc(timeAgo(action.timestamp))}</div>
+          </div>
+          <div class="subtle mono" style="margin-top:8px;">${esc(action.command || "")}</div>
+          <div style="margin-top:8px;">${esc(action.output || "")}</div>
+        </div>
+      `).join("");
+    }
+
+    function renderOverview(snapshot) {
+      const crewHost = document.getElementById("crew-panel");
+      const crews = (snapshot.crews || []).filter((crew) => matchesScope(crew.rig));
+      const agents = visibleAgents(true);
+      document.getElementById("crew-summary").textContent = `${crews.length} crew workspace${crews.length === 1 ? "" : "s"} · ${agents.length} visible agent surfaces`;
+
+      crewHost.innerHTML = crews.length
+        ? crews.map((crew) => {
+            const target = `${crew.rig}/crew/${crew.name}`;
+            const agent = agents.find((item) => item.target === target);
+            const hook = agent?.hook || {};
+            const riskyModified = Array.isArray(crew.git_risky_modified) ? crew.git_risky_modified.length : 0;
+            const riskyUntracked = Array.isArray(crew.git_risky_untracked) ? crew.git_risky_untracked.length : 0;
+            const benignModified = Array.isArray(crew.git_benign_modified) ? crew.git_benign_modified.length : 0;
+            const benignUntracked = Array.isArray(crew.git_benign_untracked) ? crew.git_benign_untracked.length : 0;
+            const benignCount = benignModified + benignUntracked;
+            return `
+              <div class="agent-row">
+                <div class="agent-top">
+                  <div>
+                    <div><strong>${esc(target)}</strong></div>
+                    <div class="subtle mono">${esc(crew.path || "")}</div>
+                  </div>
+                  <div class="node-meta">
+                    <span class="chip ${crew.has_session ? "running" : ""}">${crew.has_session ? "running" : "stopped"}</span>
+                    <span class="chip ${esc(crew.git_status_tone || (crew.git_clean ? "done" : "stuck"))}">${esc(crew.git_status_label || (crew.git_clean ? "git clean" : "repo changes"))}</span>
+                  </div>
+                </div>
+                <div class="node-meta">
+                  <span class="chip">branch ${esc(crew.branch || "unknown")}</span>
+                  <span class="chip">mail ${esc(crew.mail_unread ?? 0)} unread</span>
+                  ${riskyModified ? `<span class="chip stuck">modified ${esc(riskyModified)}</span>` : ""}
+                  ${riskyUntracked ? `<span class="chip stuck">untracked ${esc(riskyUntracked)}</span>` : ""}
+                  ${benignCount ? `<span class="chip memory">local state ${esc(benignCount)}</span>` : ""}
+                  ${hook?.bead_id ? `<span class="chip ${esc(exactStatusTone(hook.status || ""))}">${esc(hook.status || "hooked")} ${esc(hook.bead_id)}</span>` : ""}
+                </div>
+              </div>
+            `;
+          }).join("")
+        : `<div class="empty">No crew workspaces detected.</div>`;
+
+      const storesHost = document.getElementById("stores-panel");
+      const stores = (snapshot.stores || []).filter((store) => matchesScope(store.scope));
+      document.getElementById("stores-summary").textContent = `${stores.length} bead store${stores.length === 1 ? "" : "s"}`;
+      storesHost.innerHTML = stores.length
+        ? stores.map((store) => {
+            const exactCounts = Object.entries(store.exact_status_counts || {});
+            const summaryEntries = Object.entries(store.summary || {});
+            return `
+              <div class="memory-row">
+                <div class="memory-top">
+                  <div>
+                    <div><strong>${esc(store.name)}</strong></div>
+                    <div class="subtle mono">${esc(store.path || "")}</div>
+                  </div>
+                  <div class="node-meta">
+                    <span class="chip ${store.available ? "done" : "stuck"}">${store.available ? "available" : "unavailable"}</span>
+                    <span class="chip">total ${esc(store.total ?? 0)}</span>
+                    <span class="chip ${store.hooked ? "running" : ""}">hooked ${esc(store.hooked ?? 0)}</span>
+                    <span class="chip ${store.blocked ? "stuck" : ""}">blocked ${esc(store.blocked ?? 0)}</span>
+                  </div>
+                </div>
+                ${summaryEntries.length ? `<div class="node-meta">${summaryEntries.map(([key, value]) => `<span class="chip">${esc(key.replaceAll("_", " "))} ${esc(value)}</span>`).join("")}</div>` : ""}
+                ${exactCounts.length ? `<div class="node-meta">${exactCounts.map(([key, value]) => `<span class="chip ${esc(exactStatusTone(key))}">${esc(key)} ${esc(value)}</span>`).join("")}</div>` : ""}
+                ${store.error ? `<pre>${esc(store.error)}</pre>` : ""}
+              </div>
+            `;
+          }).join("")
+        : `<div class="empty">No bead stores discovered.</div>`;
+
+      const statusHost = document.getElementById("status-panel");
+      const visibleTasks = filteredTaskNodes();
+      const storedCounts = {};
+      visibleTasks.forEach((task) => {
+        storedCounts[task.status] = (storedCounts[task.status] || 0) + 1;
+      });
+      statusHost.innerHTML = `
+        <div class="card">
+          <h3>Visible Task Statuses</h3>
+          <div class="node-meta">
+            ${Object.entries(storedCounts).length
+              ? Object.entries(storedCounts).map(([key, value]) => `<span class="chip ${esc(exactStatusTone(key))}">${esc(key)} ${esc(value)}</span>`).join("")
+              : `<span class="chip">No visible task nodes</span>`}
+          </div>
+        </div>
+        <div class="stack">
+          ${(snapshot.status_legend || []).map((item) => `
+            <div class="memory-row">
+              <div class="memory-top">
+                <div><strong>${esc(item.icon)} ${esc(item.name)}</strong></div>
+              </div>
+              <div>${esc(item.meaning)}</div>
+            </div>
+          `).join("")}
+        </div>
+      `;
+
+      document.getElementById("raw-status").textContent = snapshot.status?.raw || "No gt status output.";
+      document.getElementById("raw-vitals").textContent = snapshot.vitals_raw || "No gt vitals output.";
+    }
+
+    function renderErrors(errors) {
+      const panel = document.getElementById("errors-panel");
+      const host = document.getElementById("errors-list");
+      if (!errors || !errors.length) {
+        panel.hidden = true;
+        host.innerHTML = "";
+        return;
+      }
+      panel.hidden = false;
+      host.innerHTML = errors.map((error) => `
+        <details class="error-item">
+          <summary>${esc(error.command)} (${esc(error.duration_ms)} ms)</summary>
+          <pre style="margin-top:10px;">${esc(error.error || "")}
+
+cwd: ${esc(error.cwd || "")}
+returncode: ${esc(error.returncode ?? "")}</pre>
+        </details>
+      `).join("");
+    }
+
+    function renderChrome(snapshot) {
+      document.getElementById("gt-root").textContent = snapshot.gt_root || "";
+      document.getElementById("snapshot-stamp").textContent =
+        `${formatTime(snapshot.generated_at)} · ${timeAgo(snapshot.generated_at)} · ${snapshot.generation_ms || 0} ms`;
+      document.getElementById("service-stamp").textContent =
+        (snapshot.status?.services || []).join(" | ") || "No service line parsed";
+      const scopeLabel = app.selectedScope === "all" ? "All" : (app.selectedScope === "hq" ? "HQ" : app.selectedScope);
+      document.getElementById("footer-right").textContent =
+        `${snapshot.status?.town || "Town"} · ${scopeLabel} · ${snapshot.status?.overseer || "no overseer parsed"}`;
+      document.getElementById("footer-left").textContent =
+        `Polling every second · gt ${snapshot.timings?.gt_commands_ms || 0} ms · agents ${snapshot.timings?.agent_commands_ms || 0} ms · bd ${snapshot.timings?.bd_commands_ms || 0} ms · git ${snapshot.timings?.git_commands_ms || 0} ms`;
+    }
+
+    function updateLivePill(snapshot) {
+      const pill = document.getElementById("live-pill");
+      const label = document.getElementById("live-label");
+      pill.classList.remove("stale", "error");
+      const age = app.lastSuccessMs ? Math.floor((Date.now() - app.lastSuccessMs) / 1000) : 0;
+      if (!app.lastSuccessMs) {
+        label.textContent = "Booting";
+        return;
+      }
+      if ((snapshot.errors?.length || 0) > 0) {
+        pill.classList.add("error");
+        label.textContent = `Degraded · ${age}s`;
+        return;
+      }
+      if (age >= 3) {
+        pill.classList.add("stale");
+        label.textContent = `Stale · ${age}s`;
+        return;
+      }
+      label.textContent = `Live · ${age}s`;
+    }
+
+    function renderAll() {
+      if (!app.snapshot) return;
+      const freezePrimary = shouldFreezePrimaryTerminal();
+      syncScopeSelector();
+      ensureSelection();
+      renderChrome(app.snapshot);
+      if (!freezePrimary) renderPrimaryTerminal();
+      renderMetrics();
+      renderGraph();
+      renderFocus();
+      renderAgentRoster();
+      renderFeed();
+      renderGit();
+      renderOverview(app.snapshot);
+      renderActions(app.snapshot.actions || []);
+      renderErrors(app.snapshot.errors || []);
+      updateLivePill(app.snapshot);
+    }
+
+    function showToast(message, ok = true) {
+      const toast = document.getElementById("toast");
+      toast.textContent = message;
+      toast.className = `toast show ${ok ? "ok" : "bad"}`;
+      window.clearTimeout(app.toastTimer);
+      app.toastTimer = window.setTimeout(() => {
+        toast.className = "toast";
+      }, 3200);
+    }
+
+    async function fetchSnapshot(force = false) {
+      if (app.inFlight && !force) return;
+      app.inFlight = true;
+      try {
+        const response = await fetch(`/api/snapshot?ts=${Date.now()}`, { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        const changed = !app.snapshot || app.snapshot.generated_at !== data.generated_at;
+        app.snapshot = data;
+        app.lastSuccessMs = Date.now();
+        if (force || changed) {
+          renderAll();
+        } else {
+          updateLivePill(app.snapshot);
+        }
+      } catch (error) {
+        updateLivePill({ errors: [{ error: String(error) }] });
+      } finally {
+        app.inFlight = false;
+      }
+    }
+
+    async function fetchPrimaryTerminal(force = false) {
+      const agent = getPrimaryTerminalAgent();
+      if (!agent) {
+        app.primaryTerminal = null;
+        app.primaryTerminalDataKey = "none";
+        if (!shouldFreezePrimaryTerminal()) {
+          renderPrimaryTerminal();
+        }
+        return;
+      }
+      if (app.primaryTerminalInFlight) {
+        const stuck = (Date.now() - app.primaryTerminalFetchStartedAt) >= PRIMARY_TERMINAL_FETCH_TIMEOUT_MS;
+        if (!force && !stuck) return;
+        try {
+          app.primaryTerminalAbortController?.abort();
+        } catch (_error) {
+        }
+      }
+      const requestId = app.primaryTerminalRequestId + 1;
+      app.primaryTerminalRequestId = requestId;
+      app.primaryTerminalInFlight = true;
+      app.primaryTerminalFetchStartedAt = Date.now();
+      const controller = new AbortController();
+      app.primaryTerminalAbortController = controller;
+      const timeoutId = window.setTimeout(() => controller.abort(), PRIMARY_TERMINAL_FETCH_TIMEOUT_MS);
+      try {
+        const response = await fetch(`/api/terminal?target=${encodeURIComponent(agent.target)}&ts=${Date.now()}`, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        app.primaryTerminal = data;
+        app.primaryTerminalDataKey = buildPrimaryTerminalDataKey(getPrimaryTerminalViewAgent());
+        if (!shouldFreezePrimaryTerminal() && (force || app.primaryTerminalDataKey !== app.primaryTerminalRenderedKey)) {
+          renderPrimaryTerminal();
+        }
+      } catch (error) {
+        if (error?.name !== "AbortError") {
+          console.error(error);
+        }
+      } finally {
+        window.clearTimeout(timeoutId);
+        if (requestId === app.primaryTerminalRequestId) {
+          app.primaryTerminalInFlight = false;
+          app.primaryTerminalAbortController = null;
+          app.primaryTerminalFetchStartedAt = 0;
+        }
+      }
+    }
+
+    async function postAction(path, payload, options = {}) {
+      const refresh = options.refresh !== false;
+      const showSuccessToast = options.successToast !== false;
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || `HTTP ${response.status}`);
+      }
+      if (showSuccessToast) {
+        showToast(data.output || `${data.kind} sent`, true);
+      }
+      if (refresh) {
+        await fetchSnapshot(true);
+      }
+      return data;
+    }
+
+    async function loadDiff(repoId, sha) {
+      const key = `${repoId}:${sha}`;
+      if (app.diffCache.has(key)) {
+        app.diffKey = key;
+        renderGit();
+        return;
+      }
+      try {
+        const response = await fetch(`/api/git/diff?repo=${encodeURIComponent(repoId)}&sha=${encodeURIComponent(sha)}`, { cache: "no-store" });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        app.diffCache.set(key, data.text || "");
+        app.diffKey = key;
+        renderGit();
+      } catch (error) {
+        showToast(String(error), false);
+      }
+    }
+
+    document.getElementById("refresh-button").addEventListener("click", () => fetchSnapshot(true));
+    document.getElementById("scope-select").addEventListener("change", (event) => {
+      app.selectedScope = event.target.value;
+      app.primaryTerminal = null;
+      ensureSelection();
+      renderAll();
+      fetchPrimaryTerminal(true);
+    });
+    document.getElementById("include-system").addEventListener("change", (event) => {
+      app.includeSystem = event.target.checked;
+      ensureSelection();
+      renderAll();
+    });
+    document.getElementById("hide-completed-convoys").addEventListener("change", (event) => {
+      app.hideCompletedConvoys = event.target.checked;
+      ensureSelection();
+      renderAll();
+    });
+
+    document.addEventListener("input", (event) => {
+      if (event.target?.id === "primary-inject-message") {
+        app.primaryInjectDraft = event.target.value;
+      }
+    });
+
+    document.addEventListener("toggle", (event) => {
+      const detail = event.target;
+      if (!(detail instanceof HTMLDetailsElement)) return;
+      const key = detail.dataset.preserveOpenKey;
+      if (!key) return;
+      if (detail.open) {
+        app.openDetails.add(key);
+        window.requestAnimationFrame(() => restoreTmuxLogStates(detail));
+      } else {
+        app.openDetails.delete(key);
+      }
+    }, true);
+
+    document.addEventListener("scroll", (event) => {
+      const log = event.target;
+      if (!(log instanceof HTMLElement)) return;
+      const key = log.dataset.logScrollKey;
+      if (!key) return;
+      const maxScrollTop = Math.max(0, log.scrollHeight - log.clientHeight);
+      app.tmuxLogScrollStates.set(key, {
+        pinnedBottom: maxScrollTop - log.scrollTop <= 8,
+        offsetFromBottom: Math.max(0, maxScrollTop - log.scrollTop),
+        initialized: true,
+      });
+    }, true);
+
+    document.addEventListener("mousedown", (event) => {
+      if (event.button !== 0) return;
+      const log = document.getElementById("primary-terminal-log");
+      if (!log || !log.contains(event.target)) return;
+      if (event.target.closest("button, textarea, input, select")) return;
+      app.primaryPointerSelecting = true;
+      app.primarySelectionFreezeUntil = Date.now() + PRIMARY_SELECTION_FREEZE_MS;
+      syncPrimarySelectionState();
+    });
+
+    document.addEventListener("mouseup", () => {
+      if (!app.primaryPointerSelecting) return;
+      app.primaryPointerSelecting = false;
+      app.primarySelectionFreezeUntil = hasPrimaryLogSelection() ? (Date.now() + PRIMARY_SELECTION_FREEZE_MS) : 0;
+      window.setTimeout(syncPrimarySelectionState, 0);
+    });
+
+    document.addEventListener("selectionchange", () => {
+      if (hasPrimaryLogSelection()) {
+        app.primarySelectionFreezeUntil = Date.now() + PRIMARY_SELECTION_FREEZE_MS;
+      } else if (!app.primaryPointerSelecting) {
+        app.primarySelectionFreezeUntil = 0;
+      }
+      syncPrimarySelectionState();
+    });
+
+    window.addEventListener("blur", () => {
+      app.primaryPointerSelecting = false;
+      if (!hasPrimaryLogSelection()) {
+        app.primarySelectionFreezeUntil = 0;
+      }
+      syncPrimarySelectionState();
+    });
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        app.primaryPointerSelecting = false;
+        if (!hasPrimaryLogSelection()) {
+          app.primarySelectionFreezeUntil = 0;
+        }
+        syncPrimarySelectionState();
+        return;
+      }
+      fetchPrimaryTerminal(true);
+      fetchSnapshot(false);
+    });
+
+    window.addEventListener("focus", () => {
+      fetchPrimaryTerminal(true);
+      fetchSnapshot(false);
+    });
+
+    document.addEventListener("click", async (event) => {
+      if (app.suppressGraphClick) {
+        app.suppressGraphClick = false;
+        if (event.target.closest(".graph-wrap")) {
+          event.preventDefault();
+          return;
+        }
+      }
+      const target = event.target.closest("[data-node-id], [data-inline-toggle], [data-retry-task], [data-pause-agent], [data-pause-target], [data-select-target], [data-focus-primary-inject], [data-diff-repo], #inject-submit, #primary-inject-submit");
+      if (!target) return;
+
+      if (target.dataset.inlineToggle) {
+        const key = target.dataset.inlineToggle;
+        if (app.openDetails.has(key)) {
+          app.openDetails.delete(key);
+        } else {
+          app.openDetails.add(key);
+        }
+        renderPrimaryTerminal();
+        return;
+      }
+
+      if (target.dataset.nodeId) {
+        app.selectedNodeId = target.dataset.nodeId;
+        renderAll();
+        return;
+      }
+
+      if (target.dataset.retryTask) {
+        try {
+          await postAction("/api/action/retry-task", { task_id: target.dataset.retryTask });
+        } catch (error) {
+          showToast(String(error), false);
+        }
+        return;
+      }
+
+      if (target.dataset.pauseAgent) {
+        try {
+          await postAction("/api/action/pause-agent", { target: target.dataset.pauseAgent });
+        } catch (error) {
+          showToast(String(error), false);
+        }
+        return;
+      }
+
+      if (target.dataset.pauseTarget) {
+        const injectTarget = document.getElementById("inject-target");
+        const selectedTarget = injectTarget?.value || target.dataset.pauseTarget;
+        if (!selectedTarget) {
+          showToast("No target selected.", false);
+          return;
+        }
+        try {
+          await postAction("/api/action/pause-agent", { target: selectedTarget });
+        } catch (error) {
+          showToast(String(error), false);
+        }
+        return;
+      }
+
+      if (target.dataset.selectTarget) {
+        const injectTarget = document.getElementById("inject-target");
+        if (injectTarget) injectTarget.value = target.dataset.selectTarget;
+        const messageBox = document.getElementById("inject-message");
+        if (messageBox) messageBox.focus();
+        return;
+      }
+
+      if (target.dataset.focusPrimaryInject) {
+        const messageBox = document.getElementById("primary-inject-message");
+        if (messageBox) messageBox.focus();
+        return;
+      }
+
+      if (target.dataset.diffRepo && target.dataset.diffSha) {
+        await loadDiff(target.dataset.diffRepo, target.dataset.diffSha);
+        return;
+      }
+
+      if (target.id === "inject-submit") {
+        const injectTarget = document.getElementById("inject-target");
+        const messageBox = document.getElementById("inject-message");
+        const selectedTarget = injectTarget?.value || "";
+        const message = messageBox?.value || "";
+        if (!selectedTarget || !message.trim()) {
+          showToast("Pick a target and enter an instruction.", false);
+          return;
+        }
+        try {
+          await postAction("/api/action/inject", { target: selectedTarget, message });
+          messageBox.value = "";
+        } catch (error) {
+          showToast(String(error), false);
+        }
+        return;
+      }
+
+      if (target.id === "primary-inject-submit") {
+        const messageBox = document.getElementById("primary-inject-message");
+        const selectedTarget = target.dataset.primaryTarget || messageBox?.dataset.primaryTarget || "";
+        const message = messageBox?.value || app.primaryInjectDraft || "";
+        if (app.primarySending) {
+          return;
+        }
+        if (!selectedTarget || !message.trim()) {
+          showToast("Enter a message for this terminal.", false);
+          return;
+        }
+        app.primarySending = true;
+        renderPrimaryTerminal();
+        try {
+          const data = await postAction("/api/action/write-terminal", { target: selectedTarget, message }, { refresh: false, successToast: false });
+          if (data.terminal && data.terminal.target === selectedTarget) {
+            app.primaryTerminal = data.terminal;
+          }
+          app.primaryInjectDraft = "";
+          if (messageBox) messageBox.value = "";
+          renderPrimaryTerminal();
+        } catch (error) {
+          showToast(String(error), false);
+        } finally {
+          app.primarySending = false;
+          renderPrimaryTerminal();
+        }
+        window.setTimeout(() => fetchPrimaryTerminal(true), 120);
+        window.setTimeout(() => fetchSnapshot(false), 200);
+      }
+    });
+
+    document.addEventListener("keydown", async (event) => {
+      if (event.target?.id !== "primary-inject-message") return;
+      if (event.key !== "Enter" || event.isComposing) return;
+      const messageBox = event.target;
+      if (event.metaKey || event.ctrlKey || event.shiftKey) {
+        event.preventDefault();
+        const start = messageBox.selectionStart ?? messageBox.value.length;
+        const end = messageBox.selectionEnd ?? messageBox.value.length;
+        const nextValue = `${messageBox.value.slice(0, start)}\n${messageBox.value.slice(end)}`;
+        messageBox.value = nextValue;
+        messageBox.selectionStart = start + 1;
+        messageBox.selectionEnd = start + 1;
+        app.primaryInjectDraft = nextValue;
+        return;
+      }
+      event.preventDefault();
+      const button = document.getElementById("primary-inject-submit");
+      if (button) button.click();
+    });
+
+    initGraphPan();
+    fetchSnapshot(true).then(() => fetchPrimaryTerminal(true));
+    window.setInterval(() => fetchPrimaryTerminal(false), 1000);
+    window.setInterval(() => fetchSnapshot(false), 4000);
+  </script>
+</body>
+</html>
