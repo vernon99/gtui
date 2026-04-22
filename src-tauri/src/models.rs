@@ -155,6 +155,8 @@ pub struct ActivityGroup {
     #[serde(default)]
     pub events: Vec<Value>,
     #[serde(default)]
+    pub memory: Vec<Value>,
+    #[serde(default)]
     pub agent_count: u32,
 }
 
