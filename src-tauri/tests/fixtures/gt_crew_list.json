@@ -1,0 +1,20 @@
+[
+  {
+    "name": "gtui",
+    "scope": "gtui",
+    "path": "/home/user/gt/gtui",
+    "git_has_risky_changes": false
+  },
+  {
+    "name": "gastown",
+    "scope": "gastown",
+    "path": "/home/user/gt/gastown",
+    "git_has_risky_changes": true
+  },
+  {
+    "name": "beads",
+    "scope": "beads",
+    "path": "/home/user/gt/beads",
+    "git_has_risky_changes": true
+  }
+]

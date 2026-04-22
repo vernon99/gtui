@@ -1,0 +1,3 @@
+{"type":"assistant","message":{"role":"assistant","content":"no cwd here"}}
+not-json-line-should-be-skipped
+{"type":"user","sessionId":"abc-123","cwd":"/tmp/proj","message":{"role":"user","content":"late cwd"}}
