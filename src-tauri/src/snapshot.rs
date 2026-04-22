@@ -4,9 +4,9 @@
 //! five coarse `gt` CLI calls are fanned out in parallel via `tokio::join!`
 //! (Python's `run_command` is blocking and sequential), but the downstream
 //! collectors (`collect_agents`, `collect_bead_data`, `collect_git_memory`,
-//! `collect_convoy_data`, `finalize_graph`) run inline; `build_activity_groups`
-//! is still stubbed as a follow-on bead. Everything the store *does* own —
-//! locks, polling loop, action ring buffer, caches — is in place.
+//! `collect_convoy_data`, `finalize_graph`, `build_activity_groups`) run
+//! inline. Everything the store *does* own — locks, polling loop, action ring
+//! buffer, caches — is in place.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
@@ -24,7 +24,8 @@ use tokio::task::JoinHandle;
 use crate::command::{display_command, run_command, RunOptions};
 use crate::config::POLL_INTERVAL;
 use crate::models::{
-    default_status_legend, Activity, AgentInfo, Metrics, StatusSummary, Timings, WorkspaceSnapshot,
+    default_status_legend, Activity, ActivityGroup, AgentInfo, Metrics, StatusSummary, Timings,
+    WorkspaceSnapshot,
 };
 use crate::parse::{now_iso, parse_feed, parse_status_summary};
 use crate::sessions::{
@@ -1074,6 +1075,18 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
     // onto the raw bead graph. Mirrors `finalize_graph` in `webui/server.py`.
     let graph = finalize_graph(&bead_data, &git_memory, &convoys);
     let repo_count = git_memory.repos.len() as u32;
+
+    // Bucket live agents by hooked bead, attach task memory links. Runs after
+    // `finalize_graph` because the group metadata falls back to the finalized
+    // node's `ui_status`/`is_system` flags.
+    let graph_nodes: Vec<Value> = graph
+        .get("nodes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let activity = build_activity_groups(&agents, &graph_nodes, &git_memory.task_memory);
+    let task_groups_count = activity.groups.len() as u32;
+
     let git = git_memory.into_json();
 
     let active_agents = agents.iter().filter(|agent| agent.has_session).count() as u32;
@@ -1094,11 +1107,11 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
         done_tasks,
         system_running,
         active_agents,
+        task_groups: task_groups_count,
         repos: repo_count,
         command_errors: errors.len() as u32,
         stored_status_counts,
         derived_status_counts,
-        ..Metrics::default()
     };
 
     let actions_for_snapshot = action_history
@@ -1117,7 +1130,7 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
         summary,
         alerts,
         graph,
-        activity: Activity::default(),
+        activity,
         git,
         convoys,
         crews,
@@ -2917,6 +2930,204 @@ fn finalize_graph(bead_data: &BeadData, git_memory: &GitMemory, convoys: &Value)
         "nodes": filtered_nodes,
         "edges": filtered_edges,
     })
+}
+
+/// Rust port of `build_activity_groups` in `webui/server.py`. Buckets every
+/// agent by its hooked bead id, enriching each group with the finalized graph
+/// node's title/status/scope (falling back to the agent's hook data when a
+/// node is absent) and the per-task commit/merge memory produced by
+/// `collect_git_memory`. Agents with no bead id but live signal
+/// (events, a tmux session, or a runtime state) land in `unassigned_agents`.
+///
+/// Event lists are tailed: up to 6 events per agent payload, up to 10 per
+/// group. Groups are sorted by (system-last, ui_status priority, task_id) to
+/// match the Python contract; unassigned agents are sorted by `target` for
+/// stable rendering.
+fn build_activity_groups(
+    agents: &[AgentInfo],
+    graph_nodes: &[Value],
+    task_memory: &BTreeMap<String, Vec<Value>>,
+) -> Activity {
+    let node_map: HashMap<&str, &Value> = graph_nodes
+        .iter()
+        .filter_map(|n| n.get("id").and_then(Value::as_str).map(|id| (id, n)))
+        .collect();
+
+    let mut group_order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, ActivityGroup> = HashMap::new();
+    let mut unassigned_agents: Vec<AgentInfo> = Vec::new();
+
+    for agent in agents {
+        let hook = &agent.hook;
+        let bead_id = hook
+            .get("bead_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+
+        let events_len = agent.events.len();
+        let tail_start = events_len.saturating_sub(6);
+        let trimmed_events: Vec<Value> = agent.events[tail_start..].to_vec();
+
+        // Mirror the Python payload: 13 fields only. The remaining AgentInfo
+        // fields stay at their defaults so this payload serializes with the
+        // shape documented in WEBUI_SNAPSHOT_PARITY.md (`activity.groups[].agents`).
+        let hook_payload = if hook.is_null() {
+            json!({})
+        } else {
+            hook.clone()
+        };
+        let crew_payload = if agent.crew.is_null() {
+            json!({})
+        } else {
+            agent.crew.clone()
+        };
+        let polecat_payload = if agent.polecat.is_null() {
+            json!({})
+        } else {
+            agent.polecat.clone()
+        };
+        let payload = AgentInfo {
+            target: agent.target.clone(),
+            label: agent.label.clone(),
+            role: agent.role.clone(),
+            scope: agent.scope.clone(),
+            kind: agent.kind.clone(),
+            has_session: agent.has_session,
+            runtime_state: agent.runtime_state.clone(),
+            current_path: agent.current_path.clone(),
+            session_name: agent.session_name.clone(),
+            hook: hook_payload,
+            events: trimmed_events,
+            crew: crew_payload,
+            polecat: polecat_payload,
+            ..AgentInfo::default()
+        };
+
+        if bead_id.is_empty() {
+            if !payload.events.is_empty()
+                || payload.has_session
+                || !payload.runtime_state.is_empty()
+            {
+                unassigned_agents.push(payload);
+            }
+            continue;
+        }
+
+        let node = node_map.get(bead_id.as_str()).copied();
+        let entry = groups.entry(bead_id.clone());
+        let group = match entry {
+            std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
+            std::collections::hash_map::Entry::Vacant(v) => {
+                let title = node
+                    .and_then(|n| n.get("title"))
+                    .and_then(Value::as_str)
+                    .map(String::from)
+                    .unwrap_or_else(|| {
+                        hook.get("title")
+                            .and_then(Value::as_str)
+                            .map(String::from)
+                            .unwrap_or_else(|| bead_id.clone())
+                    });
+                let stored_status = node
+                    .and_then(|n| n.get("status"))
+                    .and_then(Value::as_str)
+                    .map(String::from)
+                    .unwrap_or_else(|| {
+                        hook.get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string()
+                    });
+                let ui_status = node
+                    .and_then(|n| n.get("ui_status"))
+                    .and_then(Value::as_str)
+                    .map(String::from)
+                    .unwrap_or_else(|| {
+                        hook.get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("running")
+                            .to_string()
+                    });
+                let is_system = match node
+                    .and_then(|n| n.get("is_system"))
+                    .and_then(Value::as_bool)
+                {
+                    Some(b) => b,
+                    None => hook
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .starts_with("mol-"),
+                };
+                let scope = node
+                    .and_then(|n| n.get("scope"))
+                    .and_then(Value::as_str)
+                    .map(String::from)
+                    .unwrap_or_else(|| agent.scope.clone());
+                let memory = task_memory.get(&bead_id).cloned().unwrap_or_default();
+                group_order.push(bead_id.clone());
+                v.insert(ActivityGroup {
+                    task_id: bead_id.clone(),
+                    title,
+                    stored_status,
+                    ui_status,
+                    is_system,
+                    scope,
+                    agents: Vec::new(),
+                    events: Vec::new(),
+                    memory,
+                    agent_count: 0,
+                })
+            }
+        };
+        group.events.extend(payload.events.iter().cloned());
+        group.agents.push(payload);
+    }
+
+    let mut task_groups: Vec<ActivityGroup> = group_order
+        .into_iter()
+        .filter_map(|id| groups.remove(&id))
+        .collect();
+
+    for group in task_groups.iter_mut() {
+        let events_len = group.events.len();
+        let tail_start = events_len.saturating_sub(10);
+        group.events = group.events[tail_start..].to_vec();
+        group.agent_count = group.agents.len() as u32;
+    }
+
+    task_groups.sort_by(|a, b| {
+        fn status_order(s: &str) -> u8 {
+            match s {
+                "running" => 0,
+                "stuck" => 1,
+                "ready" => 2,
+                "ice" => 3,
+                "done" => 4,
+                "memory" => 5,
+                _ => 9,
+            }
+        }
+        let a_key = (
+            u8::from(a.is_system),
+            status_order(&a.ui_status),
+            a.task_id.as_str(),
+        );
+        let b_key = (
+            u8::from(b.is_system),
+            status_order(&b.ui_status),
+            b.task_id.as_str(),
+        );
+        a_key.cmp(&b_key)
+    });
+
+    unassigned_agents.sort_by(|a, b| a.target.cmp(&b.target));
+
+    Activity {
+        groups: task_groups,
+        unassigned_agents,
+    }
 }
 
 /// Port of `collect_polecats` in `webui/server.py`. Invokes
@@ -5105,5 +5316,191 @@ mod finalize_graph_tests {
             .find(|n| n["kind"] == "commit")
             .expect("commit node present");
         assert_eq!(commit["scope"], "gastown");
+    }
+}
+
+#[cfg(test)]
+mod build_activity_groups_tests {
+    use super::*;
+
+    fn agent(
+        target: &str,
+        bead_id: &str,
+        events: Vec<Value>,
+        has_session: bool,
+        runtime_state: &str,
+    ) -> AgentInfo {
+        AgentInfo {
+            target: target.into(),
+            label: target.into(),
+            role: "polecat".into(),
+            scope: "gtui".into(),
+            kind: "external".into(),
+            has_session,
+            runtime_state: runtime_state.into(),
+            current_path: "/tmp".into(),
+            session_name: "".into(),
+            hook: if bead_id.is_empty() {
+                Value::Null
+            } else {
+                json!({"bead_id": bead_id, "title": "hook title", "status": "running"})
+            },
+            events,
+            crew: Value::Null,
+            polecat: Value::Null,
+            ..AgentInfo::default()
+        }
+    }
+
+    fn task_node(id: &str, ui_status: &str, extras: Value) -> Value {
+        let mut node = json!({
+            "id": id,
+            "title": format!("Task {id}"),
+            "status": "open",
+            "ui_status": ui_status,
+            "is_system": false,
+            "scope": "gtui",
+        });
+        if let Some(obj) = extras.as_object() {
+            for (k, v) in obj {
+                node[k] = v.clone();
+            }
+        }
+        node
+    }
+
+    #[test]
+    fn groups_agents_by_bead_id_and_pulls_title_from_node() {
+        let agents = vec![
+            agent("gtui/polecats/nux", "gui-cqe.10", vec![], true, ""),
+            agent("gtui/polecats/furiosa", "gui-cqe.10", vec![], true, ""),
+        ];
+        let nodes = vec![task_node("gui-cqe.10", "running", json!({}))];
+        let activity = build_activity_groups(&agents, &nodes, &BTreeMap::new());
+        assert_eq!(activity.groups.len(), 1);
+        let group = &activity.groups[0];
+        assert_eq!(group.task_id, "gui-cqe.10");
+        assert_eq!(group.title, "Task gui-cqe.10");
+        assert_eq!(group.agent_count, 2);
+        assert_eq!(group.agents.len(), 2);
+        assert!(activity.unassigned_agents.is_empty());
+    }
+
+    #[test]
+    fn falls_back_to_hook_fields_when_node_is_absent() {
+        let mut a = agent("gtui/polecats/nux", "gui-cqe.99", vec![], true, "");
+        a.hook = json!({
+            "bead_id": "gui-cqe.99",
+            "title": "mol-polecat-work",
+            "status": "ready",
+        });
+        let activity = build_activity_groups(&[a], &[], &BTreeMap::new());
+        let group = &activity.groups[0];
+        assert_eq!(group.title, "mol-polecat-work");
+        assert_eq!(group.stored_status, "ready");
+        // ui_status defaults to "running" when neither node nor hook.status="running" override it.
+        // Here hook.status is "ready", which is used as ui_status fallback.
+        assert_eq!(group.ui_status, "ready");
+        assert!(group.is_system, "mol- prefix should classify as system");
+    }
+
+    #[test]
+    fn unassigned_requires_signal_otherwise_dropped() {
+        let noisy = agent("gtui/a", "", vec![json!({"k": "v"})], false, "");
+        let live = agent("gtui/b", "", vec![], true, "");
+        let statey = agent("gtui/c", "", vec![], false, "idle");
+        let silent = agent("gtui/d", "", vec![], false, "");
+        let activity = build_activity_groups(
+            &[noisy, live, statey, silent],
+            &[],
+            &BTreeMap::new(),
+        );
+        assert!(activity.groups.is_empty());
+        let targets: Vec<&str> = activity
+            .unassigned_agents
+            .iter()
+            .map(|a| a.target.as_str())
+            .collect();
+        assert_eq!(targets, vec!["gtui/a", "gtui/b", "gtui/c"]);
+    }
+
+    #[test]
+    fn attaches_task_memory_entries_to_group() {
+        let agents = vec![agent("gtui/polecats/nux", "gui-cqe.10", vec![], true, "")];
+        let nodes = vec![task_node("gui-cqe.10", "running", json!({}))];
+        let mut task_memory = BTreeMap::new();
+        task_memory.insert(
+            "gui-cqe.10".to_string(),
+            vec![json!({"sha": "abc123", "source": "commit-message"})],
+        );
+        let activity = build_activity_groups(&agents, &nodes, &task_memory);
+        let group = &activity.groups[0];
+        assert_eq!(group.memory.len(), 1);
+        assert_eq!(group.memory[0]["sha"], "abc123");
+    }
+
+    #[test]
+    fn sorts_groups_by_system_flag_then_status_then_id() {
+        let agents = vec![
+            agent("a/1", "sys-run", vec![], true, ""),
+            agent("a/2", "task-ready", vec![], true, ""),
+            agent("a/3", "task-running", vec![], true, ""),
+            agent("a/4", "task-stuck", vec![], true, ""),
+        ];
+        let nodes = vec![
+            task_node("sys-run", "running", json!({"is_system": true})),
+            task_node("task-ready", "ready", json!({})),
+            task_node("task-running", "running", json!({})),
+            task_node("task-stuck", "stuck", json!({})),
+        ];
+        let activity = build_activity_groups(&agents, &nodes, &BTreeMap::new());
+        let order: Vec<&str> = activity
+            .groups
+            .iter()
+            .map(|g| g.task_id.as_str())
+            .collect();
+        // Non-system first (running, stuck, ready), then system nodes.
+        assert_eq!(order, vec!["task-running", "task-stuck", "task-ready", "sys-run"]);
+    }
+
+    #[test]
+    fn trims_agent_events_to_six_and_group_events_to_ten() {
+        let long_events: Vec<Value> = (0..8).map(|i| json!({"i": i})).collect();
+        let a1 = agent("a/1", "t", long_events.clone(), true, "");
+        let a2 = agent("a/2", "t", long_events, true, "");
+        let nodes = vec![task_node("t", "running", json!({}))];
+        let activity = build_activity_groups(&[a1, a2], &nodes, &BTreeMap::new());
+        let group = &activity.groups[0];
+        // Each agent's payload should have 6 events (tail of 8).
+        assert_eq!(group.agents[0].events.len(), 6);
+        assert_eq!(group.agents[1].events.len(), 6);
+        // Group events = concat of two agents' trimmed events (12) then trimmed to 10.
+        assert_eq!(group.events.len(), 10);
+    }
+
+    #[test]
+    fn agent_with_no_bead_and_no_signal_is_dropped() {
+        let ghost = agent("ghost/1", "", vec![], false, "");
+        let activity = build_activity_groups(&[ghost], &[], &BTreeMap::new());
+        assert!(activity.groups.is_empty());
+        assert!(activity.unassigned_agents.is_empty());
+    }
+
+    #[test]
+    fn payload_hook_and_crew_default_to_empty_object_when_null() {
+        let a = agent("gtui/polecats/nux", "", vec![], true, "");
+        let activity = build_activity_groups(&[a], &[], &BTreeMap::new());
+        let payload = &activity.unassigned_agents[0];
+        assert_eq!(payload.hook, json!({}));
+        assert_eq!(payload.crew, json!({}));
+        assert_eq!(payload.polecat, json!({}));
+    }
+
+    #[test]
+    fn fallback_scope_uses_agent_when_node_missing() {
+        let mut a = agent("gtui/polecats/nux", "orphan", vec![], true, "");
+        a.scope = "gastown".into();
+        let activity = build_activity_groups(&[a], &[], &BTreeMap::new());
+        assert_eq!(activity.groups[0].scope, "gastown");
     }
 }
