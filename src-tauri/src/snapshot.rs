@@ -1005,6 +1005,15 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
     errors.extend(agent_errors);
     let _ = hook_by_issue; // Consumed by collect_bead_data in a later bead.
 
+    // Discover bead stores (hq + per-rig) and collect the per-store summary.
+    // Graph / node / merge-link construction that `collect_bead_data` also
+    // produces is tracked in the next bead (gui-cqe.6) and left stubbed here.
+    let bead_stores = discover_bead_stores(gt_root);
+    let (store_summaries, bead_store_snapshots, store_errors, bead_ms) =
+        collect_bead_store_summaries(&bead_stores).await;
+    errors.extend(store_errors);
+    let _ = bead_store_snapshots; // Consumed by collect_bead_data in gui-cqe.6.
+
     // Downstream collectors are stubbed for this bead — future ports will
     // flesh these out. We keep the JSON shape the frontend already consumes.
     let graph = json!({
@@ -1050,12 +1059,13 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
         convoys,
         crews,
         agents,
-        stores: Vec::new(),
+        stores: store_summaries,
         actions: actions_for_snapshot,
         errors,
         timings: Timings {
             gt_commands_ms,
             agent_commands_ms: agent_ms,
+            bd_commands_ms: bead_ms,
             ..Timings::default()
         },
     }
@@ -1135,6 +1145,358 @@ fn worker_count(total: usize, cap: usize) -> usize {
         return 1;
     }
     total.min(cap).max(1)
+}
+
+/// A discovered beads store — either the town-level `hq` store rooted at
+/// `gt_root` or a per-rig store under `gt_root/<rig>/.beads`.
+///
+/// Port of the `{"name", "path", "scope"}` dicts returned by
+/// `discover_bead_stores` in `webui/server.py`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeadStore {
+    pub name: String,
+    pub path: PathBuf,
+    pub scope: String,
+}
+
+/// Read `rigs.json` and return the configured rig names, sorted. Mirrors
+/// `configured_rig_names` in `webui/server.py`: malformed JSON, missing file,
+/// non-object `rigs` entries, or empty keys all collapse to an empty list.
+pub fn configured_rig_names(gt_root: &Path) -> Vec<String> {
+    let rigs_path = gt_root.join("rigs.json");
+    let text = match std::fs::read_to_string(&rigs_path) {
+        Ok(text) => text,
+        Err(_) => return Vec::new(),
+    };
+    let payload: Value = match serde_json::from_str(&text) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let Some(rigs) = payload.get("rigs").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = rigs
+        .keys()
+        .filter(|name| !name.is_empty())
+        .cloned()
+        .collect();
+    names.sort();
+    names
+}
+
+/// Discover bead stores under `gt_root`. Matches `discover_bead_stores` in
+/// `webui/server.py`:
+///
+/// 1. If `gt_root/.beads` exists, emit an `hq` store rooted at `gt_root`.
+/// 2. For each rig in `rigs.json`, if `gt_root/<rig>` is a directory AND
+///    `gt_root/<rig>/.beads` exists, emit a per-rig store.
+pub fn discover_bead_stores(gt_root: &Path) -> Vec<BeadStore> {
+    let mut stores: Vec<BeadStore> = Vec::new();
+    if gt_root.join(".beads").is_dir() {
+        stores.push(BeadStore {
+            name: "hq".to_string(),
+            path: gt_root.to_path_buf(),
+            scope: "hq".to_string(),
+        });
+    }
+    for rig_name in configured_rig_names(gt_root) {
+        let child = gt_root.join(&rig_name);
+        if !child.is_dir() {
+            continue;
+        }
+        if child.join(".beads").is_dir() {
+            stores.push(BeadStore {
+                name: rig_name.clone(),
+                path: child,
+                scope: rig_name,
+            });
+        }
+    }
+    stores
+}
+
+fn count_issue_statuses(issues: &[Value]) -> BTreeMap<String, u64> {
+    let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+    for issue in issues {
+        let status = issue
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        *counts.entry(status).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn issue_ids_set(issues: &[Value]) -> std::collections::HashSet<String> {
+    issues
+        .iter()
+        .filter_map(|item| item.get("id").and_then(Value::as_str))
+        .filter(|id| !id.is_empty())
+        .map(|id| id.to_string())
+        .collect()
+}
+
+/// Raw `bd ...` results gathered for a single store. Kept around so downstream
+/// collectors (`collect_bead_data`, port pending as gui-cqe.6) can reuse the
+/// `bd list --all` / `bd blocked` / `bd list --status=hooked` payloads without
+/// re-running the subprocess.
+#[derive(Debug, Clone)]
+pub struct BeadStoreSnapshot {
+    pub store: BeadStore,
+    pub status_payload: Option<Value>,
+    pub issues: Vec<Value>,
+    pub blocked: Vec<Value>,
+    pub hooked: Vec<Value>,
+    pub status_ok: bool,
+    pub status_error: String,
+}
+
+/// Port of the per-store loop inside `collect_bead_data` in `webui/server.py`.
+/// For each discovered store, fan out the four `bd` subprocess calls
+/// (`bd status --json`, `bd list --all --json --limit 300`, `bd blocked
+/// --json`, `bd list --status=hooked --json`) and produce the `store_summaries`
+/// entry the snapshot's `stores` field exposes.
+///
+/// Returns `(store_summaries, raw_snapshots, errors, duration_ms)`. The raw
+/// snapshots are retained for downstream graph/node construction in a follow-on
+/// bead (gui-cqe.6) — today they're dropped, but keeping the API shape ready
+/// avoids a second pass over the same commands later.
+async fn collect_bead_store_summaries(
+    stores: &[BeadStore],
+) -> (Vec<Value>, Vec<BeadStoreSnapshot>, Vec<Value>, u64) {
+    if stores.is_empty() {
+        return (Vec::new(), Vec::new(), Vec::new(), 0);
+    }
+    // Fan stores out in parallel. Stores are few (usually 2–5), so the pool
+    // size matches the actual store count up to a small cap. Matches the
+    // pattern used by `collect_agents` for its hook fan-out.
+    let max_workers = worker_count(stores.len(), 4);
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(max_workers));
+    type StoreCmdTuple = (
+        BeadStore,
+        crate::command::CommandResult,
+        crate::command::CommandResult,
+        crate::command::CommandResult,
+        crate::command::CommandResult,
+    );
+    let mut handles: Vec<JoinHandle<StoreCmdTuple>> = Vec::with_capacity(stores.len());
+    for store in stores.iter().cloned() {
+        let permit_sem = semaphore.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = permit_sem.acquire_owned().await.expect("semaphore open");
+            // Python runs `bd status --json` without parse_json so invalid
+            // JSON falls back to the raw stdout; we mirror that by parsing
+            // the stdout ourselves below.
+            let status_result = run_command(
+                &["bd", "status", "--json"],
+                &store.path,
+                RunOptions::default().with_timeout(Duration::from_secs(4)),
+            )
+            .await;
+            let all_result = run_command(
+                &["bd", "list", "--all", "--json", "--limit", "300"],
+                &store.path,
+                RunOptions::default()
+                    .with_timeout(Duration::from_secs(6))
+                    .parse_json(),
+            )
+            .await;
+            let blocked_result = run_command(
+                &["bd", "blocked", "--json"],
+                &store.path,
+                RunOptions::default()
+                    .with_timeout(Duration::from_secs(4))
+                    .parse_json(),
+            )
+            .await;
+            let hooked_result = run_command(
+                &["bd", "list", "--status=hooked", "--json"],
+                &store.path,
+                RunOptions::default()
+                    .with_timeout(Duration::from_secs(4))
+                    .parse_json(),
+            )
+            .await;
+            (
+                store,
+                status_result,
+                all_result,
+                blocked_result,
+                hooked_result,
+            )
+        }));
+    }
+
+    let mut summaries: Vec<Value> = Vec::with_capacity(stores.len());
+    let mut snapshots: Vec<BeadStoreSnapshot> = Vec::with_capacity(stores.len());
+    let mut errors: Vec<Value> = Vec::new();
+    let mut duration_ms: u64 = 0;
+
+    for handle in handles {
+        let (store, status_result, all_result, blocked_result, hooked_result) = match handle.await {
+            Ok(tuple) => tuple,
+            Err(_) => continue,
+        };
+        duration_ms += status_result.duration_ms
+            + all_result.duration_ms
+            + blocked_result.duration_ms
+            + hooked_result.duration_ms;
+
+        for result in [&status_result, &all_result, &blocked_result, &hooked_result] {
+            if !result.ok {
+                errors.push(result.to_error());
+            }
+        }
+
+        // `bd status --json` is run without parse_json so its `data` holds the
+        // raw stdout string. On failure we fall back to stdout → error text,
+        // matching Python's `status_result.data if ok else (stdout or error)`.
+        let status_text: String = if status_result.ok {
+            status_result
+                .data
+                .as_ref()
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        } else if !status_result.stdout.is_empty() {
+            status_result.stdout.clone()
+        } else {
+            status_result.error.clone()
+        };
+        let status_payload: Option<Value> = if status_text.is_empty() {
+            None
+        } else {
+            serde_json::from_str(&status_text).ok()
+        };
+
+        let issues: Vec<Value> = if all_result.ok {
+            all_result
+                .data
+                .as_ref()
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let blocked: Vec<Value> = if blocked_result.ok {
+            blocked_result
+                .data
+                .as_ref()
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let hooked: Vec<Value> = if hooked_result.ok {
+            hooked_result
+                .data
+                .as_ref()
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        let blocked_local_ids = issue_ids_set(&blocked);
+        let hooked_local_ids = issue_ids_set(&hooked);
+        let mut open_count: u64 = 0;
+        let mut closed_count: u64 = 0;
+        let mut blocked_count: u64 = 0;
+        let mut hooked_count: u64 = 0;
+        for issue in &issues {
+            let id = issue
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if id.is_empty() {
+                continue;
+            }
+            let status = issue.get("status").and_then(Value::as_str).unwrap_or("");
+            if status == "closed" {
+                closed_count += 1;
+            } else {
+                open_count += 1;
+            }
+            if blocked_local_ids.contains(&id) {
+                blocked_count += 1;
+            }
+            if hooked_local_ids.contains(&id) {
+                hooked_count += 1;
+            }
+        }
+
+        let summary_obj: Value = status_payload
+            .as_ref()
+            .and_then(|v| v.as_object())
+            .and_then(|m| m.get("summary").cloned())
+            .unwrap_or_else(|| json!({}));
+        let error_text: String =
+            if let Some(obj) = status_payload.as_ref().and_then(|v| v.as_object()) {
+                obj.get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            } else if !status_result.ok {
+                status_result.error.clone()
+            } else {
+                String::new()
+            };
+
+        let exact_status_counts = count_issue_statuses(&issues);
+
+        summaries.push(json!({
+            "name": store.name,
+            "scope": store.scope,
+            "path": store.path.to_string_lossy(),
+            "available": status_result.ok,
+            "summary": summary_obj,
+            "error": error_text,
+            "exact_status_counts": exact_status_counts,
+            "total": issues.len() as u64,
+            "open": open_count,
+            "closed": closed_count,
+            "blocked": blocked_count,
+            "hooked": hooked_count,
+        }));
+
+        snapshots.push(BeadStoreSnapshot {
+            store,
+            status_payload,
+            issues,
+            blocked,
+            hooked,
+            status_ok: status_result.ok,
+            status_error: status_result.error,
+        });
+    }
+
+    // Restore input order — `tokio::spawn` resolution order is
+    // non-deterministic but Python preserves the discovery order.
+    let order: HashMap<String, usize> = stores
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.name.clone(), i))
+        .collect();
+    summaries.sort_by_key(|s| {
+        s.get("name")
+            .and_then(Value::as_str)
+            .and_then(|name| order.get(name))
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+    snapshots.sort_by_key(|snap| {
+        order
+            .get(snap.store.name.as_str())
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+
+    (summaries, snapshots, errors, duration_ms)
 }
 
 /// Port of `collect_polecats` in `webui/server.py`. Invokes
@@ -2084,5 +2446,155 @@ mod tests {
         let alerts = derive_alerts(&StatusSummary::default(), &crews);
         assert_eq!(alerts.len(), 1);
         assert!(alerts[0].contains('2'));
+    }
+
+    #[test]
+    fn configured_rig_names_returns_sorted_rig_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(
+            root.join("rigs.json"),
+            r#"{"rigs": {"zeta": {}, "alpha": {}, "gtui": {}}}"#,
+        )
+        .unwrap();
+        let names = configured_rig_names(root);
+        assert_eq!(names, vec!["alpha", "gtui", "zeta"]);
+    }
+
+    #[test]
+    fn configured_rig_names_missing_file_is_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(configured_rig_names(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn configured_rig_names_malformed_json_is_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("rigs.json"), "not-json").unwrap();
+        assert!(configured_rig_names(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn configured_rig_names_drops_empty_and_non_object_rigs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("rigs.json"),
+            r#"{"rigs": {"": {}, "good": {}}}"#,
+        )
+        .unwrap();
+        assert_eq!(configured_rig_names(dir.path()), vec!["good"]);
+
+        std::fs::write(dir.path().join("rigs.json"), r#"{"rigs": []}"#).unwrap();
+        assert!(configured_rig_names(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn discover_bead_stores_emits_hq_and_per_rig_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".beads")).unwrap();
+        std::fs::create_dir_all(root.join("gtui/.beads")).unwrap();
+        std::fs::create_dir_all(root.join("gastown/.beads")).unwrap();
+        // Configured but no .beads dir — skipped.
+        std::fs::create_dir_all(root.join("solo")).unwrap();
+        // Configured but not a directory on disk — skipped.
+        std::fs::write(
+            root.join("rigs.json"),
+            r#"{"rigs": {"gtui": {}, "gastown": {}, "solo": {}, "ghost": {}}}"#,
+        )
+        .unwrap();
+        let stores = discover_bead_stores(root);
+        let names: Vec<&str> = stores.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["hq", "gastown", "gtui"]);
+        assert_eq!(stores[0].path, root.to_path_buf());
+        assert_eq!(stores[0].scope, "hq");
+        assert_eq!(stores[1].path, root.join("gastown"));
+        assert_eq!(stores[1].scope, "gastown");
+    }
+
+    #[test]
+    fn discover_bead_stores_without_hq_still_lists_rigs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        // No .beads at the root, so no hq store.
+        std::fs::create_dir_all(root.join("gtui/.beads")).unwrap();
+        std::fs::write(root.join("rigs.json"), r#"{"rigs": {"gtui": {}}}"#).unwrap();
+        let stores = discover_bead_stores(root);
+        assert_eq!(stores.len(), 1);
+        assert_eq!(stores[0].name, "gtui");
+    }
+
+    #[test]
+    fn discover_bead_stores_empty_root_returns_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(discover_bead_stores(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn count_issue_statuses_handles_missing_status() {
+        let issues = vec![
+            json!({"id": "a", "status": "open"}),
+            json!({"id": "b", "status": "open"}),
+            json!({"id": "c", "status": "closed"}),
+            json!({"id": "d"}),
+        ];
+        let counts = count_issue_statuses(&issues);
+        assert_eq!(counts.get("open"), Some(&2));
+        assert_eq!(counts.get("closed"), Some(&1));
+        assert_eq!(counts.get("unknown"), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn collect_bead_store_summaries_empty_stores_is_noop() {
+        let (summaries, snapshots, errors, ms) = collect_bead_store_summaries(&[]).await;
+        assert!(summaries.is_empty());
+        assert!(snapshots.is_empty());
+        assert!(errors.is_empty());
+        assert_eq!(ms, 0);
+    }
+
+    #[tokio::test]
+    async fn collect_bead_store_summaries_records_errors_when_bd_missing() {
+        // Point at an isolated tempdir so the `bd` subprocess fails fast (no
+        // beads data). The summary must still be emitted with the fixture
+        // shape and `available = false`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stores = vec![BeadStore {
+            name: "hq".into(),
+            path: dir.path().to_path_buf(),
+            scope: "hq".into(),
+        }];
+        let (summaries, snapshots, errors, _ms) = collect_bead_store_summaries(&stores).await;
+        assert_eq!(summaries.len(), 1);
+        let store = &summaries[0];
+        for key in [
+            "available",
+            "blocked",
+            "closed",
+            "error",
+            "exact_status_counts",
+            "hooked",
+            "name",
+            "open",
+            "path",
+            "scope",
+            "summary",
+            "total",
+        ] {
+            assert!(
+                store.get(key).is_some(),
+                "store summary missing key `{key}`: {store:?}"
+            );
+        }
+        assert_eq!(store["name"], "hq");
+        assert_eq!(store["scope"], "hq");
+        assert_eq!(store["total"], 0);
+        assert_eq!(store["open"], 0);
+        // Any subprocess failure feeds `errors` and forces `available=false`.
+        assert!(!errors.is_empty());
+        assert_eq!(store["available"], false);
+        // Raw snapshot is always emitted so downstream collectors can reuse it.
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].store.name, "hq");
     }
 }
