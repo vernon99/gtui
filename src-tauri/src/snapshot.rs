@@ -1196,6 +1196,25 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
     let (convoys, convoy_errors, convoy_ms) = collect_convoy_data(gt_root).await;
     errors.extend(convoy_errors);
 
+    // Layer linked commits, commit nodes/edges, and the "interesting" filter
+    // onto the raw bead graph. Mirrors `finalize_graph` in `webui/server.py`.
+    let graph = finalize_graph(&bead_data, &git_memory, &convoys);
+    let repo_count = git_memory.repos.len() as u32;
+
+    // Bucket live agents by hooked bead, attach task memory links. Runs after
+    // `finalize_graph` because the group metadata falls back to the finalized
+    // node's `ui_status`/`is_system` flags.
+    let graph_nodes: Vec<Value> = graph
+        .get("nodes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let activity = build_activity_groups(&agents, &graph_nodes, &git_memory.task_memory);
+    let task_groups_count = activity.groups.len() as u32;
+
+    // Summary counters are derived from the *finalized* graph (post-filter),
+    // matching `build_snapshot` in `webui/server.py` — so totals line up with
+    // what the UI actually renders.
     let mut running_tasks: u32 = 0;
     let mut stuck_tasks: u32 = 0;
     let mut ready_tasks: u32 = 0;
@@ -1203,7 +1222,7 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
     let mut ice_tasks: u32 = 0;
     let mut system_running: u32 = 0;
     let mut stored_status_counts: BTreeMap<String, u32> = BTreeMap::new();
-    for node in &bead_data.nodes {
+    for node in &graph_nodes {
         if node.get("kind").and_then(Value::as_str) != Some("task") {
             continue;
         }
@@ -1240,32 +1259,30 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
     derived_status_counts.insert("done".into(), done_tasks);
     derived_status_counts.insert("ice".into(), ice_tasks);
 
-    // Layer linked commits, commit nodes/edges, and the "interesting" filter
-    // onto the raw bead graph. Mirrors `finalize_graph` in `webui/server.py`.
-    let graph = finalize_graph(&bead_data, &git_memory, &convoys);
-    let repo_count = git_memory.repos.len() as u32;
-
-    // Bucket live agents by hooked bead, attach task memory links. Runs after
-    // `finalize_graph` because the group metadata falls back to the finalized
-    // node's `ui_status`/`is_system` flags.
-    let graph_nodes: Vec<Value> = graph
-        .get("nodes")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let activity = build_activity_groups(&agents, &graph_nodes, &git_memory.task_memory);
-    let task_groups_count = activity.groups.len() as u32;
-
     let git = git_memory.into_json();
 
     let active_agents = agents.iter().filter(|agent| agent.has_session).count() as u32;
-    let mut alerts = derive_alerts(&status_summary, &crews);
+    // Alerts order mirrors Python: daemon → no-running → stuck → risky-crews.
+    let mut alerts = derive_alerts(&status_summary);
     if running_tasks == 0 && ready_tasks > 0 && active_agents > 0 {
         alerts.push("Agents are alive, but no product tasks are currently running.".to_string());
     }
     if stuck_tasks > 0 {
         alerts.push(format!(
             "{stuck_tasks} task node(s) are dependency-blocked."
+        ));
+    }
+    let risky_crews = crews
+        .iter()
+        .filter(|c| {
+            c.get("git_has_risky_changes")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .count();
+    if risky_crews > 0 {
+        alerts.push(format!(
+            "{risky_crews} crew workspace(s) have risky repo changes."
         ));
     }
 
@@ -1315,7 +1332,6 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
             convoy_commands_ms: convoy_ms,
         },
     }
-    .tag_feed(feed_events)
 }
 
 fn slung_event_re() -> &'static Regex {
@@ -3786,7 +3802,7 @@ fn merge_crews(all_crews: Vec<Value>, running_crews: Vec<Value>) -> Vec<Value> {
 
 /// Alerts ported from the Python `build_snapshot` logic that are cheap without
 /// needing the downstream collectors.
-fn derive_alerts(status: &StatusSummary, crews: &[Value]) -> Vec<String> {
+fn derive_alerts(status: &StatusSummary) -> Vec<String> {
     let mut alerts = Vec::new();
     if status
         .services
@@ -3794,19 +3810,6 @@ fn derive_alerts(status: &StatusSummary, crews: &[Value]) -> Vec<String> {
         .any(|svc| svc.contains("daemon (stopped)"))
     {
         alerts.push("Gas Town daemon is stopped.".to_string());
-    }
-    let risky_crews = crews
-        .iter()
-        .filter(|c| {
-            c.get("git_has_risky_changes")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        })
-        .count();
-    if risky_crews > 0 {
-        alerts.push(format!(
-            "{risky_crews} crew workspace(s) have risky repo changes."
-        ));
     }
     alerts
 }
@@ -3842,22 +3845,6 @@ fn fnv1a(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
-}
-
-trait WorkspaceSnapshotFeedExt {
-    fn tag_feed(self, feed_events: Vec<Value>) -> Self;
-}
-
-impl WorkspaceSnapshotFeedExt for WorkspaceSnapshot {
-    /// Parked feed events on the `git.feed_events` slot for downstream
-    /// collectors to consume. This keeps the events on the snapshot without
-    /// needing to add a new field ahead of the dedicated port.
-    fn tag_feed(mut self, feed_events: Vec<Value>) -> Self {
-        if let Some(obj) = self.git.as_object_mut() {
-            obj.insert("feed_events".into(), Value::Array(feed_events));
-        }
-        self
-    }
 }
 
 #[cfg(test)]
@@ -4021,7 +4008,7 @@ mod tests {
             services: vec!["daemon (stopped)".into(), "dolt (running)".into()],
             ..StatusSummary::default()
         };
-        let alerts = derive_alerts(&status, &[]);
+        let alerts = derive_alerts(&status);
         assert!(alerts.iter().any(|a| a.contains("daemon is stopped")));
     }
 
@@ -4234,18 +4221,6 @@ mod tests {
             assert!(!bead.is_empty());
             assert!(!targets.is_empty());
         }
-    }
-
-    #[test]
-    fn derive_alerts_counts_risky_crews() {
-        let crews = vec![
-            json!({"name": "a", "git_has_risky_changes": true}),
-            json!({"name": "b"}),
-            json!({"name": "c", "git_has_risky_changes": true}),
-        ];
-        let alerts = derive_alerts(&StatusSummary::default(), &crews);
-        assert_eq!(alerts.len(), 1);
-        assert!(alerts[0].contains('2'));
     }
 
     #[test]
