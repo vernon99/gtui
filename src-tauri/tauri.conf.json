@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "GTUI",
   "version": "0.1.0",
-  "identifier": "com.gtui.app",
+  "identifier": "com.gastown.gtui",
   "build": {
     "frontendDist": "../src",
     "devUrl": "http://localhost:1420",
@@ -17,6 +17,8 @@
         "title": "Gas Town UI",
         "width": 1400,
         "height": 900,
+        "minWidth": 900,
+        "minHeight": 600,
         "resizable": true,
         "fullscreen": false
       }
@@ -26,8 +28,11 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
     "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "Gas Town workspace dashboard",
+    "longDescription": "GTUI is a desktop dashboard for a Gas Town workspace, showing task spine, agent activity, git memory, and live intervention hooks.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
