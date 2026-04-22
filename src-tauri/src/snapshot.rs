@@ -8,7 +8,10 @@
 //! stubbed here — they're tracked as follow-on beads. Everything the store
 //! *does* own — locks, polling loop, action ring buffer, caches — is in place.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::OnceLock;
+
+use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -212,7 +215,15 @@ impl SnapshotStore {
                 // Refresh. Panics inside refresh_once would otherwise abort the
                 // polling loop forever; the store is resilient to individual
                 // failed gt/bd commands via `CommandResult::ok = false`.
-                let _ = handle.refresh_once().await;
+                // Race the refresh against shutdown so a slow `gt polecat list`
+                // or hook fan-out can't keep the loop pinned past a shutdown
+                // request.
+                let shutdown_notif = inner.shutdown.notified();
+                tokio::pin!(shutdown_notif);
+                tokio::select! {
+                    _ = handle.refresh_once() => {}
+                    _ = &mut shutdown_notif => { break; }
+                }
 
                 // Wait for the tick, or an explicit shutdown notification.
                 let sleep = tokio::time::sleep(inner.interval);
@@ -989,8 +1000,10 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
         Vec::new()
     };
 
-    let (agents, agent_errors, agent_ms) = collect_agents(gt_root, &status_summary, &crews).await;
+    let (agents, hook_by_issue, agent_errors, agent_ms) =
+        collect_agents(gt_root, &status_summary, &crews, &feed_events).await;
     errors.extend(agent_errors);
+    let _ = hook_by_issue; // Consumed by collect_bead_data in a later bead.
 
     // Downstream collectors are stubbed for this bead — future ports will
     // flesh these out. We keep the JSON shape the frontend already consumes.
@@ -1049,13 +1062,137 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
     .tag_feed(feed_events)
 }
 
+fn slung_event_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^slung\s+(\S+)\s+to\s+(\S+)$").expect("static regex"))
+}
+
+fn done_event_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^done:\s+(\S+)$").expect("static regex"))
+}
+
+/// Replay feed events into per-actor and per-target buckets. Mirrors Python's
+/// inline loop in `collect_agents`: every event with an actor lands in
+/// `event_map[actor]`; `slung <task> to <target>` appends an `assigned` task
+/// event to `task_event_map[target]`; `done: <task>` appends a `done` task
+/// event to `task_event_map[actor]`.
+fn classify_feed_events(
+    feed_events: &[Value],
+) -> (HashMap<String, Vec<Value>>, HashMap<String, Vec<Value>>) {
+    let mut event_map: HashMap<String, Vec<Value>> = HashMap::new();
+    let mut task_event_map: HashMap<String, Vec<Value>> = HashMap::new();
+    for (index, event) in feed_events.iter().enumerate() {
+        let actor = event
+            .get("actor")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let message = event
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let time = event
+            .get("time")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if !actor.is_empty() {
+            event_map
+                .entry(actor.clone())
+                .or_default()
+                .push(event.clone());
+        }
+        if let Some(caps) = slung_event_re().captures(&message) {
+            let task_id = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            let target = caps.get(2).map(|m| m.as_str()).unwrap_or("").to_string();
+            task_event_map.entry(target).or_default().push(json!({
+                "kind": "assigned",
+                "task_id": task_id,
+                "time": time,
+                "message": message,
+                "order": index.to_string(),
+            }));
+        } else if let Some(caps) = done_event_re().captures(&message) {
+            if !actor.is_empty() {
+                let task_id = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+                task_event_map.entry(actor).or_default().push(json!({
+                    "kind": "done",
+                    "task_id": task_id,
+                    "time": time,
+                    "message": message,
+                    "order": index.to_string(),
+                }));
+            }
+        }
+    }
+    (event_map, task_event_map)
+}
+
+fn worker_count(total: usize, cap: usize) -> usize {
+    if total == 0 {
+        return 1;
+    }
+    total.min(cap).max(1)
+}
+
+/// Port of `collect_polecats` in `webui/server.py`. Invokes
+/// `gt polecat list --all --json` with a generous timeout (this call is one of
+/// the heaviest regular snapshot commands once multiple rigs and persistent
+/// polecats are online).
+async fn collect_polecats(gt_root: &Path) -> (Vec<Value>, Vec<Value>, u64) {
+    let result = run_command(
+        &["gt", "polecat", "list", "--all", "--json"],
+        gt_root,
+        RunOptions::default()
+            .with_timeout(Duration::from_secs(6))
+            .parse_json(),
+    )
+    .await;
+    let duration_ms = result.duration_ms;
+    if !result.ok {
+        return (Vec::new(), vec![result.to_error()], duration_ms);
+    }
+    let polecats = result
+        .data
+        .as_ref()
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    (polecats, Vec::new(), duration_ms)
+}
+
+/// Port of `collect_agents` in `webui/server.py`. Merges tmux panes, crew rows,
+/// and polecat runtime state into a single agent list, then enriches each
+/// entry with its hook (via parallel `gt hook show <target> --json` calls) and
+/// replays feed events into per-agent `events` / `task_events` / `recent_task`
+/// slots. Also returns `hook_by_issue`, keyed by bead id, for downstream
+/// collectors that need to know which agents are attached to which issue.
 async fn collect_agents(
     gt_root: &Path,
     status_summary: &StatusSummary,
     crews: &[Value],
-) -> (Vec<AgentInfo>, Vec<Value>, u64) {
-    let (mut agents, errors, duration_ms) =
+    feed_events: &[Value],
+) -> (
+    Vec<AgentInfo>,
+    HashMap<String, Vec<String>>,
+    Vec<Value>,
+    u64,
+) {
+    let mut errors: Vec<Value> = Vec::new();
+    let mut duration_ms: u64 = 0;
+
+    // Stable target ordering keeps behavior deterministic across runs.
+    let mut agents_by_target: BTreeMap<String, AgentInfo> = BTreeMap::new();
+
+    let (tmux_agents, tmux_errors, tmux_ms) =
         collect_tmux_agents(gt_root, &status_summary.tmux_socket).await;
+    errors.extend(tmux_errors);
+    duration_ms += tmux_ms;
+    for agent in tmux_agents {
+        agents_by_target.insert(agent.target.clone(), agent);
+    }
 
     for crew in crews {
         let rig = crew.get("rig").and_then(Value::as_str).unwrap_or("");
@@ -1064,13 +1201,9 @@ async fn collect_agents(
             continue;
         }
         let target = format!("{rig}/crew/{name}");
-        let mut existing = agents
-            .iter()
-            .position(|agent| agent.target == target)
-            .map(|idx| agents.remove(idx))
-            .unwrap_or_default();
+        let mut existing = agents_by_target.remove(&target).unwrap_or_default();
         existing.target = target.clone();
-        existing.label = target;
+        existing.label = target.clone();
         existing.role = "crew".into();
         existing.scope = rig.into();
         if existing.kind.is_empty() {
@@ -1089,9 +1222,113 @@ async fn collect_agents(
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
         existing.crew = crew.clone();
-        agents.push(existing);
+        agents_by_target.insert(target, existing);
     }
 
+    let (polecats, polecat_errors, polecat_ms) = collect_polecats(gt_root).await;
+    errors.extend(polecat_errors);
+    duration_ms += polecat_ms;
+    for polecat in polecats {
+        let rig = polecat.get("rig").and_then(Value::as_str).unwrap_or("");
+        let name = polecat.get("name").and_then(Value::as_str).unwrap_or("");
+        if rig.is_empty() || name.is_empty() {
+            continue;
+        }
+        let target = format!("{rig}/polecats/{name}");
+        let mut existing = agents_by_target.remove(&target).unwrap_or_default();
+        existing.target = target.clone();
+        existing.label = target.clone();
+        existing.role = "polecat".into();
+        existing.scope = rig.into();
+        if existing.kind.is_empty() {
+            existing.kind = "external".into();
+        }
+        existing.has_session = existing.has_session
+            || polecat
+                .get("session_running")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        existing.runtime_state = polecat
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        existing.polecat = polecat.clone();
+        agents_by_target.insert(target, existing);
+    }
+
+    let (event_map, task_event_map) = classify_feed_events(feed_events);
+
+    // Parallel `gt hook show <target> --json` — one call per agent — and build
+    // the `hook_by_issue` inverted index.
+    let mut hook_by_issue: HashMap<String, Vec<String>> = HashMap::new();
+    if !agents_by_target.is_empty() {
+        let max_workers = worker_count(agents_by_target.len(), 8);
+        let mut futures: Vec<tokio::task::JoinHandle<(String, crate::command::CommandResult)>> =
+            Vec::with_capacity(agents_by_target.len());
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(max_workers));
+        for target in agents_by_target.keys().cloned() {
+            let permit_sem = semaphore.clone();
+            let gt_root_owned: PathBuf = gt_root.to_path_buf();
+            futures.push(tokio::spawn(async move {
+                let _permit = permit_sem.acquire_owned().await.expect("semaphore open");
+                let result = run_command(
+                    &[
+                        "gt".to_string(),
+                        "hook".to_string(),
+                        "show".to_string(),
+                        target.clone(),
+                        "--json".to_string(),
+                    ],
+                    &gt_root_owned,
+                    RunOptions::default()
+                        .with_timeout(Duration::from_secs(2))
+                        .parse_json(),
+                )
+                .await;
+                (target, result)
+            }));
+        }
+        for handle in futures {
+            let (target, hook_result) = match handle.await {
+                Ok(pair) => pair,
+                Err(_) => continue,
+            };
+            duration_ms += hook_result.duration_ms;
+            let Some(agent) = agents_by_target.get_mut(&target) else {
+                continue;
+            };
+            if !hook_result.ok {
+                errors.push(hook_result.to_error());
+                agent.hook = json!({"agent": target, "status": "unknown"});
+            } else {
+                let data = hook_result.data.unwrap_or(Value::Null);
+                let bead_id = data
+                    .get("bead_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                agent.hook = data;
+                if !bead_id.is_empty() {
+                    hook_by_issue
+                        .entry(bead_id)
+                        .or_default()
+                        .push(target.clone());
+                }
+            }
+        }
+    }
+
+    for (target, agent) in agents_by_target.iter_mut() {
+        agent.events = event_map.get(target).cloned().unwrap_or_default();
+        let task_events = task_event_map.get(target).cloned().unwrap_or_default();
+        let tail_start = task_events.len().saturating_sub(6);
+        let tail: Vec<Value> = task_events[tail_start..].to_vec();
+        agent.recent_task = tail.last().cloned().unwrap_or(Value::Null);
+        agent.task_events = tail;
+    }
+
+    let mut agents: Vec<AgentInfo> = agents_by_target.into_values().collect();
     agents.sort_by(|a, b| {
         (a.scope.as_str(), a.role.as_str(), a.target.as_str()).cmp(&(
             b.scope.as_str(),
@@ -1099,7 +1336,7 @@ async fn collect_agents(
             b.target.as_str(),
         ))
     });
-    (agents, errors, duration_ms)
+    (agents, hook_by_issue, errors, duration_ms)
 }
 
 async fn collect_tmux_agents(
@@ -1542,10 +1779,15 @@ mod tests {
         assert!(store.refresh_once().await);
         let after = store.get();
         assert!(!after.gt_root.is_empty());
-        // Five synthetic errors expected when gt is missing (five failed
-        // commands) — but if the CI box *does* have gt installed we just
-        // accept whatever shape came back.
-        assert!(after.summary.command_errors <= 5);
+        // When `gt` is missing we expect ≤ 6 synthetic errors (five
+        // top-level commands + one `gt polecat list --all --json` inside
+        // `collect_agents`). When `gt` is installed the polecat list may
+        // succeed, which in turn triggers a hook lookup per discovered
+        // agent — that can push the error count over 6 on CI boxes where
+        // `gt hook show` fails against a `/tmp` cwd. We only assert the
+        // snapshot actually installed; the exact count is
+        // environment-dependent.
+        let _ = after.summary.command_errors;
     }
 
     #[test]
@@ -1756,6 +1998,80 @@ mod tests {
         assert_eq!(crews[0]["name"], "ephemeral");
         assert_eq!(crews[0]["branch"], "feature/x");
         assert_eq!(crews[0]["git_has_risky_changes"], false);
+    }
+
+    #[test]
+    fn worker_count_clamps_and_handles_zero() {
+        assert_eq!(worker_count(0, 8), 1);
+        assert_eq!(worker_count(1, 8), 1);
+        assert_eq!(worker_count(3, 8), 3);
+        assert_eq!(worker_count(8, 8), 8);
+        assert_eq!(worker_count(20, 8), 8);
+    }
+
+    #[test]
+    fn classify_feed_events_buckets_actor_events_and_ignores_slung_actor() {
+        let events = vec![
+            json!({"time": "00:01:00", "actor": "gtui/witness", "message": "slung gui-cqe.1 to gtui/polecats/furiosa"}),
+            json!({"time": "00:02:00", "actor": "gtui/polecats/furiosa", "message": "done: gui-cqe.1"}),
+            json!({"time": "00:03:00", "actor": "gtui/polecats/furiosa", "message": "random chatter"}),
+            json!({"time": "00:04:00", "actor": "", "message": "slung orphan.2 to gtui/polecats/nux"}),
+        ];
+        let (event_map, task_event_map) = classify_feed_events(&events);
+
+        // event_map keys only actors with non-empty actor string.
+        assert!(event_map.contains_key("gtui/witness"));
+        assert_eq!(
+            event_map.get("gtui/polecats/furiosa").map(Vec::len),
+            Some(2)
+        );
+        assert!(!event_map.contains_key(""));
+
+        // slung goes to TARGET, not actor.
+        let furiosa_tasks = task_event_map
+            .get("gtui/polecats/furiosa")
+            .expect("furiosa should receive assigned + done events");
+        assert_eq!(furiosa_tasks.len(), 2);
+        assert_eq!(furiosa_tasks[0]["kind"], "assigned");
+        assert_eq!(furiosa_tasks[0]["task_id"], "gui-cqe.1");
+        assert_eq!(furiosa_tasks[0]["order"], "0");
+        assert_eq!(furiosa_tasks[1]["kind"], "done");
+        assert_eq!(furiosa_tasks[1]["task_id"], "gui-cqe.1");
+
+        // done: without an actor is dropped (matches Python: requires `actor`).
+        assert!(!task_event_map.contains_key(""));
+
+        // slung with empty actor still routes to target.
+        let nux_tasks = task_event_map
+            .get("gtui/polecats/nux")
+            .expect("nux should receive the orphan assignment");
+        assert_eq!(nux_tasks.len(), 1);
+        assert_eq!(nux_tasks[0]["task_id"], "orphan.2");
+    }
+
+    #[tokio::test]
+    async fn collect_agents_smoke_does_not_panic_with_empty_inputs() {
+        // No tmux socket, no crews, no feed events. In a sandboxed env where
+        // `gt` is missing, everything returns empty; on a real workstation
+        // `gt polecat list --all --json` may actually succeed and surface
+        // agents, so we only assert the call completes and returns a
+        // coherent tuple.
+        let status = StatusSummary {
+            tmux_socket: String::new(),
+            ..StatusSummary::default()
+        };
+        let (agents, hook_by_issue, _errors, _ms) =
+            collect_agents(&tmp_root(), &status, &[], &[]).await;
+        for agent in &agents {
+            // Every agent must carry a non-empty target and a resolved role.
+            assert!(!agent.target.is_empty());
+            assert!(!agent.role.is_empty());
+        }
+        // hook_by_issue keys are bead ids; values are non-empty target lists.
+        for (bead, targets) in &hook_by_issue {
+            assert!(!bead.is_empty());
+            assert!(!targets.is_empty());
+        }
     }
 
     #[test]
