@@ -15,11 +15,14 @@ pub fn run() {
     let poller = store.clone();
     tauri::Builder::default()
         .setup(move |_app| {
-            // Kick off the background polling task. Dropping the JoinHandle
-            // does not cancel the task in tokio; cleanup happens when the
-            // process exits. A future revision can wire SnapshotStore::shutdown
-            // into an app-exit hook.
-            std::mem::drop(poller.spawn());
+            // `SnapshotStore::spawn` calls `tokio::spawn` internally, which
+            // requires a current runtime. Tauri's setup hook runs on the
+            // main thread outside any runtime, so schedule the spawn on
+            // Tauri's managed async runtime instead — the outer task
+            // enters the tokio context before the inner spawn runs.
+            tauri::async_runtime::spawn(async move {
+                poller.spawn();
+            });
             Ok(())
         })
         .manage(store)
