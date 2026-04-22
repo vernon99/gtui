@@ -321,6 +321,35 @@ impl SnapshotStore {
             .cloned()
     }
 
+    async fn discover_agent(&self, target: &str) -> Option<AgentInfo> {
+        let cached_agent = self.get_agent(target);
+        let tmux_socket = self.get_tmux_socket();
+        if tmux_socket.is_empty() {
+            return cached_agent;
+        }
+
+        let (live_agents, _, _) = collect_tmux_agents(&self.inner.gt_root, &tmux_socket).await;
+        let live_agent = live_agents.into_iter().find(|agent| agent.target == target);
+        match (cached_agent, live_agent) {
+            (Some(mut cached), Some(live)) => {
+                cached.target = live.target;
+                cached.label = live.label;
+                cached.role = live.role;
+                cached.scope = live.scope;
+                cached.kind = live.kind;
+                cached.has_session = live.has_session;
+                cached.current_path = live.current_path;
+                cached.session_name = live.session_name;
+                cached.pane_id = live.pane_id;
+                cached.current_command = live.current_command;
+                Some(cached)
+            }
+            (Some(cached), None) => Some(cached),
+            (None, Some(live)) => Some(live),
+            (None, None) => None,
+        }
+    }
+
     /// Current tmux socket name as parsed from `gt status --fast`.
     pub fn get_tmux_socket(&self) -> String {
         self.inner
@@ -527,7 +556,8 @@ impl SnapshotStore {
     /// transcript when tmux is reachable.
     pub async fn get_terminal_state(&self, target: &str) -> Result<Value, String> {
         let agent = self
-            .get_agent(target)
+            .discover_agent(target)
+            .await
             .ok_or_else(|| format!("Unknown terminal target: {target}"))?;
 
         let tmux_socket = self.get_tmux_socket();
@@ -674,7 +704,8 @@ impl SnapshotStore {
             return Err("Terminal message is empty.".to_string());
         }
         let agent = self
-            .get_agent(target)
+            .discover_agent(target)
+            .await
             .ok_or_else(|| format!("Unknown terminal target: {target}"))?;
         if !agent.has_session {
             return Err(format!(
@@ -1036,12 +1067,20 @@ async fn collect_tmux_agents(
         let pane_id = parts.next().unwrap_or("").to_string();
         let pane_path = parts.next().unwrap_or("").to_string();
         let pane_command = parts.next().unwrap_or("").to_string();
-        let Some(target) = parse_tmux_target(gt_root, &pane_path) else {
+        let session_target = parse_tmux_session_target(&session_name);
+        let Some(target) = session_target
+            .clone()
+            .or_else(|| parse_tmux_target(gt_root, &pane_path))
+        else {
             continue;
         };
         if target.role == "boot" {
             continue;
         }
+        let current_path = session_target
+            .as_ref()
+            .and_then(|target| stable_tmux_target_path(gt_root, target))
+            .unwrap_or(pane_path);
         agents.push(AgentInfo {
             target: target.target,
             label: target.label,
@@ -1049,7 +1088,7 @@ async fn collect_tmux_agents(
             scope: target.scope,
             kind: "tmux".into(),
             has_session: true,
-            current_path: pane_path,
+            current_path,
             session_name,
             pane_id,
             current_command: pane_command,
@@ -1065,6 +1104,40 @@ struct TmuxTarget {
     role: String,
     scope: String,
     label: String,
+}
+
+fn parse_tmux_session_target(session_name: &str) -> Option<TmuxTarget> {
+    match session_name.to_ascii_lowercase().as_str() {
+        "hq-mayor" | "mayor" => Some(TmuxTarget {
+            target: "mayor".into(),
+            role: "mayor".into(),
+            scope: "hq".into(),
+            label: "mayor".into(),
+        }),
+        "hq-deacon" | "deacon" => Some(TmuxTarget {
+            target: "deacon".into(),
+            role: "deacon".into(),
+            scope: "hq".into(),
+            label: "deacon".into(),
+        }),
+        "hq-boot" | "boot" => Some(TmuxTarget {
+            target: "boot".into(),
+            role: "boot".into(),
+            scope: "hq".into(),
+            label: "boot".into(),
+        }),
+        _ => None,
+    }
+}
+
+fn stable_tmux_target_path(gt_root: &Path, target: &TmuxTarget) -> Option<String> {
+    let relative = match target.target.as_str() {
+        "mayor" => "mayor",
+        "deacon" => "deacon",
+        "boot" => "deacon/dogs/boot",
+        _ => return None,
+    };
+    Some(gt_root.join(relative).to_string_lossy().into_owned())
 }
 
 fn parse_tmux_target(gt_root: &Path, pane_path: &str) -> Option<TmuxTarget> {
@@ -1379,5 +1452,34 @@ mod tests {
         let alerts = derive_alerts(&StatusSummary::default(), &crews);
         assert_eq!(alerts.len(), 1);
         assert!(alerts[0].contains('2'));
+    }
+
+    #[test]
+    fn hq_tmux_session_name_takes_precedence_over_pane_path() {
+        let target = parse_tmux_session_target("hq-mayor").expect("mayor session");
+        assert_eq!(target.target, "mayor");
+        assert_eq!(target.role, "mayor");
+        assert_eq!(target.scope, "hq");
+
+        let stable = stable_tmux_target_path(Path::new("/town"), &target).expect("stable path");
+        assert_eq!(stable, "/town/mayor");
+    }
+
+    #[tokio::test]
+    async fn discover_agent_returns_cached_agent_without_tmux_socket() {
+        let store = SnapshotStore::new(tmp_root());
+        store.install_snapshot(WorkspaceSnapshot {
+            agents: vec![AgentInfo {
+                target: "mayor".into(),
+                role: "mayor".into(),
+                current_path: "/town/mayor".into(),
+                ..Default::default()
+            }],
+            ..WorkspaceSnapshot::default()
+        });
+
+        let agent = store.discover_agent("mayor").await.expect("cached agent");
+        assert_eq!(agent.target, "mayor");
+        assert_eq!(agent.current_path, "/town/mayor");
     }
 }

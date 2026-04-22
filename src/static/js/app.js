@@ -12,6 +12,7 @@ import {
 
     const PRIMARY_TERMINAL_FETCH_TIMEOUT_MS = 6000;
     const PRIMARY_SELECTION_FREEZE_MS = 2500;
+    const PRIMARY_TERMINAL_STALE_GRACE_MS = 15000;
 
     const app = {
       snapshot: null,
@@ -19,6 +20,7 @@ import {
       primaryTerminalInFlight: false,
       primaryTerminalRequestId: 0,
       primaryTerminalFetchStartedAt: 0,
+      primaryTerminalLastLiveMs: 0,
       primaryTerminalDataKey: "",
       primaryTerminalRenderedKey: "",
       primaryLogPinnedBottom: true,
@@ -342,21 +344,62 @@ import {
       return { witness: 0, refinery: 1, crew: 2, mayor: 3, deacon: 4, polecat: 5 }[role] ?? 9;
     }
 
+    function primaryTerminalHasLiveSurface(agent) {
+      if (!agent) return false;
+      return Boolean(
+        agent.has_session ||
+        agent.log_lines?.length ||
+        hasTranscriptItems(getTranscriptView(agent))
+      );
+    }
+
+    function visibleAgentByTarget(target) {
+      if (!target) return null;
+      const agents = [...visibleAgents(false), ...visiblePolecats()];
+      return agents.find((agent) => agent.target === target) || null;
+    }
+
+    function getStickyPrimaryTerminalAgent(bestAgent) {
+      const cached = app.primaryTerminal;
+      if (!cached?.target || !primaryTerminalHasLiveSurface(cached)) return null;
+      if (!matchesScope(cached.scope)) return null;
+      if (Date.now() - app.primaryTerminalLastLiveMs > PRIMARY_TERMINAL_STALE_GRACE_MS) return null;
+      if (
+        bestAgent?.has_session &&
+        bestAgent.target !== cached.target &&
+        terminalRolePriority(bestAgent.role) <= terminalRolePriority(cached.role)
+      ) {
+        return null;
+      }
+
+      const snapshotAgent = visibleAgentByTarget(cached.target);
+      return {
+        ...(snapshotAgent || {}),
+        ...cached,
+        hook: cached.hook || snapshotAgent?.hook,
+        events: cached.events || snapshotAgent?.events,
+      };
+    }
+
     function getPrimaryTerminalAgent() {
       const preferred = visibleAgents(false);
       const fallback = visiblePolecats();
       const primaryPool = preferred.length ? preferred : fallback;
-      if (!primaryPool.length) return null;
+
+      if (!primaryPool.length) {
+        return getStickyPrimaryTerminalAgent(null);
+      }
 
       const livePool = primaryPool.filter((agent) => agent.has_session || agent.events?.length);
       const candidates = livePool.length ? livePool : primaryPool;
-      return [...candidates].sort((a, b) => {
+      const bestAgent = [...candidates].sort((a, b) => {
         const aRank = terminalRolePriority(a.role);
         const bRank = terminalRolePriority(b.role);
         return aRank - bRank
           || (b.has_session ? 1 : 0) - (a.has_session ? 1 : 0)
           || a.target.localeCompare(b.target);
       })[0] || null;
+      return getStickyPrimaryTerminalAgent(bestAgent) || bestAgent;
     }
 
     function getPrimaryTerminalViewAgent() {
@@ -1759,6 +1802,9 @@ returncode: ${esc(error.returncode ?? "")}</pre>
         const data = await invoke("get_terminal", { target: agent.target });
         if (requestId !== app.primaryTerminalRequestId) return;
         app.primaryTerminal = data;
+        if (primaryTerminalHasLiveSurface(data)) {
+          app.primaryTerminalLastLiveMs = Date.now();
+        }
         app.primaryTerminalDataKey = buildPrimaryTerminalDataKey(getPrimaryTerminalViewAgent());
         if (!shouldFreezePrimaryTerminal() && (force || app.primaryTerminalDataKey !== app.primaryTerminalRenderedKey)) {
           renderPrimaryTerminal();
@@ -1807,6 +1853,7 @@ returncode: ${esc(error.returncode ?? "")}</pre>
     document.getElementById("scope-select").addEventListener("change", (event) => {
       app.selectedScope = event.target.value;
       app.primaryTerminal = null;
+      app.primaryTerminalLastLiveMs = 0;
       ensureSelection();
       renderAll();
       fetchPrimaryTerminal(true);
@@ -2021,6 +2068,9 @@ returncode: ${esc(error.returncode ?? "")}</pre>
           const data = await postAction("write_terminal", { agentId: selectedTarget, text: message }, { refresh: false, successToast: false });
           if (data.terminal && data.terminal.target === selectedTarget) {
             app.primaryTerminal = data.terminal;
+            if (primaryTerminalHasLiveSurface(data.terminal)) {
+              app.primaryTerminalLastLiveMs = Date.now();
+            }
           }
           app.primaryInjectDraft = "";
           if (messageBox) messageBox.value = "";

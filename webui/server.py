@@ -793,6 +793,28 @@ def parse_tmux_target(gt_root: Path, pane_path: str) -> dict[str, str] | None:
     return None
 
 
+def parse_tmux_session_target(session_name: str) -> dict[str, str] | None:
+    normalized = session_name.lower()
+    if normalized in {"hq-mayor", "mayor"}:
+        return {"target": "mayor", "role": "mayor", "scope": "hq", "label": "mayor"}
+    if normalized in {"hq-deacon", "deacon"}:
+        return {"target": "deacon", "role": "deacon", "scope": "hq", "label": "deacon"}
+    if normalized in {"hq-boot", "boot"}:
+        return {"target": "boot", "role": "boot", "scope": "hq", "label": "boot"}
+    return None
+
+
+def stable_tmux_target_path(gt_root: Path, target_meta: dict[str, str]) -> str:
+    target = target_meta.get("target", "")
+    if target == "mayor":
+        return str(gt_root / "mayor")
+    if target == "deacon":
+        return str(gt_root / "deacon")
+    if target == "boot":
+        return str(gt_root / "deacon" / "dogs" / "boot")
+    return ""
+
+
 def collect_tmux_agents(gt_root: Path, tmux_socket: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
     errors: list[dict[str, Any]] = []
     duration_ms = 0
@@ -820,9 +842,11 @@ def collect_tmux_agents(gt_root: Path, tmux_socket: str) -> tuple[list[dict[str,
 
     for line in pane_result.data.splitlines():
         session_name, _, pane_id, pane_path, pane_command = (line.split("|", 4) + ["", "", "", "", ""])[:5]
-        target_meta = parse_tmux_target(gt_root, pane_path)
+        session_target = parse_tmux_session_target(session_name)
+        target_meta = session_target or parse_tmux_target(gt_root, pane_path)
         if not target_meta or target_meta["role"] == "boot":
             continue
+        current_path = stable_tmux_target_path(gt_root, target_meta) if session_target else ""
         agents.append(
             {
                 "target": target_meta["target"],
@@ -832,7 +856,7 @@ def collect_tmux_agents(gt_root: Path, tmux_socket: str) -> tuple[list[dict[str,
                 "kind": "tmux",
                 "session_name": session_name,
                 "pane_id": pane_id,
-                "current_path": pane_path,
+                "current_path": current_path or pane_path,
                 "current_command": pane_command,
                 "has_session": True,
             }
@@ -869,9 +893,9 @@ def collect_agents(
                 "kind": existing.get("kind", "external"),
                 "session_name": existing.get("session_name", ""),
                 "pane_id": existing.get("pane_id", ""),
-                "current_path": crew.get("path", existing.get("current_path", "")),
+                "current_path": existing.get("current_path") or crew.get("path", ""),
                 "current_command": existing.get("current_command", ""),
-                "has_session": bool(crew.get("has_session")),
+                "has_session": bool(existing.get("has_session")) or bool(crew.get("has_session")),
                 "crew": crew,
             }
         )
@@ -894,7 +918,7 @@ def collect_agents(
                 "pane_id": existing.get("pane_id", ""),
                 "current_path": existing.get("current_path", ""),
                 "current_command": existing.get("current_command", ""),
-                "has_session": bool(polecat.get("session_running")),
+                "has_session": bool(existing.get("has_session")) or bool(polecat.get("session_running")),
                 "polecat": polecat,
                 "runtime_state": polecat.get("state", ""),
             }
