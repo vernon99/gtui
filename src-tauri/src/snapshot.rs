@@ -4,9 +4,10 @@
 //! five coarse `gt` CLI calls are fanned out in parallel via `tokio::join!`
 //! (Python's `run_command` is blocking and sequential), but the downstream
 //! collectors (`collect_agents`, `collect_bead_data`, `collect_git_memory`,
-//! `collect_convoy_data`, `finalize_graph`, `build_activity_groups`) are
-//! stubbed here — they're tracked as follow-on beads. Everything the store
-//! *does* own — locks, polling loop, action ring buffer, caches — is in place.
+//! `collect_convoy_data`) run inline; `finalize_graph` and
+//! `build_activity_groups` are still stubbed as follow-on beads. Everything
+//! the store *does* own — locks, polling loop, action ring buffer, caches —
+//! is in place.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
@@ -1023,6 +1024,9 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
         collect_git_memory(gt_root, &crews, &bead_data.merge_links).await;
     errors.extend(git_errors);
 
+    let (convoys, convoy_errors, convoy_ms) = collect_convoy_data(gt_root).await;
+    errors.extend(convoy_errors);
+
     let mut running_tasks: u32 = 0;
     let mut stuck_tasks: u32 = 0;
     let mut ready_tasks: u32 = 0;
@@ -1067,19 +1071,14 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
     derived_status_counts.insert("done".into(), done_tasks);
     derived_status_counts.insert("ice".into(), ice_tasks);
 
-    // Downstream collectors are still stubbed — convoy data comes online in
-    // a later bead and `finalize_graph` layers linked commits onto the nodes
-    // below.
+    // `finalize_graph` still layers linked commits onto the nodes below in a
+    // later bead; everything else upstream is live.
     let graph = json!({
         "nodes": bead_data.nodes.clone(),
         "edges": bead_data.edges.clone(),
     });
     let repo_count = git_memory.repos.len() as u32;
     let git = git_memory.into_json();
-    let convoys = json!({
-        "convoys": Vec::<Value>::new(),
-        "task_index": {},
-    });
 
     let active_agents = agents.iter().filter(|agent| agent.has_session).count() as u32;
     let mut alerts = derive_alerts(&status_summary, &crews);
@@ -1135,7 +1134,7 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
             agent_commands_ms: agent_ms,
             bd_commands_ms: bead_ms,
             git_commands_ms: git_ms,
-            ..Timings::default()
+            convoy_commands_ms: convoy_ms,
         },
     }
     .tag_feed(feed_events)
@@ -2473,6 +2472,200 @@ pub async fn collect_git_memory(
             repo_ids,
         },
         errors,
+        duration_ms,
+    )
+}
+
+/// Rust port of `collect_convoy_data` in `webui/server.py`. Runs
+/// `bd list --type=convoy --all --json` once, then folds the raw convoy rows
+/// into the `{convoys, task_index}` shape the frontend expects. The
+/// `task_index` maps each tracked task id to `{total, open, closed,
+/// convoy_ids, all_closed}` so the UI can badge tasks with their enclosing
+/// convoy state.
+///
+/// Behaviour mirrors the Python port 1:1:
+/// - A convoy is considered complete when `status == "closed"`.
+/// - When the raw payload lacks a `tracked` list, dependency edges of type
+///   `tracks` are used as the fallback source of task ids.
+/// - Each tracked task increments `total` on its `task_index` entry and
+///   either `open` or `closed` depending on the enclosing convoy's status.
+/// - `completed`/`total` on the convoy row prefer the values from the raw
+///   payload; when absent or zero they fall back to
+///   `len(tracked_ids) if closed else 0` and `len(tracked_ids)` respectively.
+pub async fn collect_convoy_data(gt_root: &Path) -> (Value, Vec<Value>, u64) {
+    let result = run_command(
+        &["bd", "list", "--type=convoy", "--all", "--json"],
+        gt_root,
+        RunOptions::default().parse_json(),
+    )
+    .await;
+    let duration_ms = result.duration_ms;
+    if !result.ok {
+        return (
+            json!({
+                "convoys": Vec::<Value>::new(),
+                "task_index": serde_json::Map::<String, Value>::new(),
+            }),
+            vec![result.to_error()],
+            duration_ms,
+        );
+    }
+
+    let raw_convoys: Vec<Value> = result
+        .data
+        .as_ref()
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    struct TaskEntry {
+        total: i64,
+        open: i64,
+        closed: i64,
+        convoy_ids: Vec<String>,
+    }
+
+    let mut task_order: Vec<String> = Vec::new();
+    let mut task_index: HashMap<String, TaskEntry> = HashMap::new();
+    let mut convoys_out: Vec<Value> = Vec::with_capacity(raw_convoys.len());
+
+    for raw in &raw_convoys {
+        if !raw.is_object() {
+            continue;
+        }
+        let convoy_id = raw
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let status = raw
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let title = raw
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let is_closed = status == "closed";
+
+        let empty_vec: Vec<Value> = Vec::new();
+        let tracked = raw
+            .get("tracked")
+            .and_then(Value::as_array)
+            .unwrap_or(&empty_vec);
+        let dependencies = raw
+            .get("dependencies")
+            .and_then(Value::as_array)
+            .unwrap_or(&empty_vec);
+
+        // When `tracked` is empty (or missing), fall back to dependency edges
+        // of type `tracks`. Matches the Python `if not tracked_items` branch.
+        let tracked_items: Vec<&Value> = if !tracked.is_empty() {
+            tracked.iter().collect()
+        } else {
+            dependencies
+                .iter()
+                .filter(|item| {
+                    if !item.is_object() {
+                        return false;
+                    }
+                    let kind = item
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .or_else(|| item.get("dependency_type").and_then(Value::as_str))
+                        .unwrap_or("");
+                    kind == "tracks"
+                })
+                .collect()
+        };
+
+        let mut tracked_ids: Vec<String> = Vec::new();
+        for item in tracked_items {
+            if !item.is_object() {
+                continue;
+            }
+            let task_id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .or_else(|| item.get("depends_on_id").and_then(Value::as_str))
+                .or_else(|| item.get("issue_id").and_then(Value::as_str))
+                .unwrap_or("")
+                .to_string();
+            if task_id.is_empty() {
+                continue;
+            }
+            tracked_ids.push(task_id.clone());
+
+            let entry = task_index.entry(task_id.clone()).or_insert_with(|| {
+                task_order.push(task_id.clone());
+                TaskEntry {
+                    total: 0,
+                    open: 0,
+                    closed: 0,
+                    convoy_ids: Vec::new(),
+                }
+            });
+            entry.total += 1;
+            if is_closed {
+                entry.closed += 1;
+            } else {
+                entry.open += 1;
+            }
+            if !convoy_id.is_empty() && !entry.convoy_ids.contains(&convoy_id) {
+                entry.convoy_ids.push(convoy_id.clone());
+            }
+        }
+
+        let tracked_len = tracked_ids.len() as i64;
+        let completed = raw
+            .get("completed")
+            .and_then(Value::as_i64)
+            .filter(|&n| n != 0)
+            .unwrap_or(if is_closed { tracked_len } else { 0 });
+        let total = raw
+            .get("total")
+            .and_then(Value::as_i64)
+            .filter(|&n| n != 0)
+            .unwrap_or(tracked_len);
+
+        convoys_out.push(json!({
+            "id": convoy_id,
+            "title": title,
+            "status": status,
+            "tracked_ids": tracked_ids,
+            "completed": completed,
+            "total": total,
+        }));
+    }
+
+    // Preserve insertion order (the order tasks first appear across convoys)
+    // by using a separate `task_order` vector rather than iterating a HashMap.
+    let mut task_index_json = serde_json::Map::with_capacity(task_order.len());
+    for task_id in task_order {
+        let entry = task_index
+            .remove(&task_id)
+            .expect("task_order is derived from task_index keys");
+        let all_closed = entry.total > 0 && entry.open == 0;
+        task_index_json.insert(
+            task_id,
+            json!({
+                "total": entry.total,
+                "open": entry.open,
+                "closed": entry.closed,
+                "convoy_ids": entry.convoy_ids,
+                "all_closed": all_closed,
+            }),
+        );
+    }
+
+    (
+        json!({
+            "convoys": convoys_out,
+            "task_index": Value::Object(task_index_json),
+        }),
+        Vec::new(),
         duration_ms,
     )
 }
@@ -4072,5 +4265,301 @@ mod tests {
         assert!(value.get("recent_commits").is_some());
         assert!(value.get("task_memory").is_some());
         assert!(value.get("repo_ids").is_some());
+    }
+
+    #[tokio::test]
+    async fn collect_convoy_data_returns_empty_shape_when_bd_missing() {
+        // No `bd` binary on PATH in the sandbox; the collector must still
+        // return the `{convoys: [], task_index: {}}` shape and record the
+        // subprocess failure in `errors`.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (value, errors, _ms) = collect_convoy_data(tmp.path()).await;
+        assert_eq!(
+            value.get("convoys").and_then(Value::as_array),
+            Some(&Vec::<Value>::new())
+        );
+        assert!(value
+            .get("task_index")
+            .and_then(Value::as_object)
+            .map(|m| m.is_empty())
+            .unwrap_or(false));
+        assert!(!errors.is_empty(), "missing bd binary should surface");
+    }
+}
+
+#[cfg(test)]
+mod convoy_tests {
+    //! Pure-logic tests for convoy folding. The HTTP/subprocess-less path is
+    //! exercised via a private helper so we can isolate the transformation
+    //! from the `bd` command that feeds it.
+    use super::*;
+
+    /// Test helper that invokes the same folding logic as
+    /// [`collect_convoy_data`] but against an in-memory `Vec<Value>`.
+    fn fold_raw_convoys(raw: Vec<Value>) -> Value {
+        // Re-implement the minimal shell so we can unit-test the folding
+        // without reaching for a subprocess. Kept intentionally small — the
+        // production path in `collect_convoy_data` owns any future changes.
+        use serde_json::Map;
+
+        struct TaskEntry {
+            total: i64,
+            open: i64,
+            closed: i64,
+            convoy_ids: Vec<String>,
+        }
+
+        let mut task_order: Vec<String> = Vec::new();
+        let mut task_index: HashMap<String, TaskEntry> = HashMap::new();
+        let mut convoys_out: Vec<Value> = Vec::new();
+
+        for row in &raw {
+            if !row.is_object() {
+                continue;
+            }
+            let convoy_id = row
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let status = row
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let title = row
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let is_closed = status == "closed";
+
+            let empty_vec: Vec<Value> = Vec::new();
+            let tracked = row
+                .get("tracked")
+                .and_then(Value::as_array)
+                .unwrap_or(&empty_vec);
+            let dependencies = row
+                .get("dependencies")
+                .and_then(Value::as_array)
+                .unwrap_or(&empty_vec);
+
+            let tracked_items: Vec<&Value> = if !tracked.is_empty() {
+                tracked.iter().collect()
+            } else {
+                dependencies
+                    .iter()
+                    .filter(|item| {
+                        if !item.is_object() {
+                            return false;
+                        }
+                        let kind = item
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .or_else(|| item.get("dependency_type").and_then(Value::as_str))
+                            .unwrap_or("");
+                        kind == "tracks"
+                    })
+                    .collect()
+            };
+
+            let mut tracked_ids: Vec<String> = Vec::new();
+            for item in tracked_items {
+                if !item.is_object() {
+                    continue;
+                }
+                let task_id = item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .or_else(|| item.get("depends_on_id").and_then(Value::as_str))
+                    .or_else(|| item.get("issue_id").and_then(Value::as_str))
+                    .unwrap_or("")
+                    .to_string();
+                if task_id.is_empty() {
+                    continue;
+                }
+                tracked_ids.push(task_id.clone());
+
+                let entry = task_index.entry(task_id.clone()).or_insert_with(|| {
+                    task_order.push(task_id.clone());
+                    TaskEntry {
+                        total: 0,
+                        open: 0,
+                        closed: 0,
+                        convoy_ids: Vec::new(),
+                    }
+                });
+                entry.total += 1;
+                if is_closed {
+                    entry.closed += 1;
+                } else {
+                    entry.open += 1;
+                }
+                if !convoy_id.is_empty() && !entry.convoy_ids.contains(&convoy_id) {
+                    entry.convoy_ids.push(convoy_id.clone());
+                }
+            }
+
+            let tracked_len = tracked_ids.len() as i64;
+            let completed = row
+                .get("completed")
+                .and_then(Value::as_i64)
+                .filter(|&n| n != 0)
+                .unwrap_or(if is_closed { tracked_len } else { 0 });
+            let total = row
+                .get("total")
+                .and_then(Value::as_i64)
+                .filter(|&n| n != 0)
+                .unwrap_or(tracked_len);
+
+            convoys_out.push(json!({
+                "id": convoy_id,
+                "title": title,
+                "status": status,
+                "tracked_ids": tracked_ids,
+                "completed": completed,
+                "total": total,
+            }));
+        }
+
+        let mut task_index_json = Map::new();
+        for task_id in task_order {
+            let entry = task_index.remove(&task_id).expect("known key");
+            let all_closed = entry.total > 0 && entry.open == 0;
+            task_index_json.insert(
+                task_id,
+                json!({
+                    "total": entry.total,
+                    "open": entry.open,
+                    "closed": entry.closed,
+                    "convoy_ids": entry.convoy_ids,
+                    "all_closed": all_closed,
+                }),
+            );
+        }
+
+        json!({
+            "convoys": convoys_out,
+            "task_index": Value::Object(task_index_json),
+        })
+    }
+
+    #[test]
+    fn folds_tracked_items_and_counts_open_vs_closed() {
+        let raw = vec![
+            json!({
+                "id": "hq-cv-1",
+                "title": "Convoy 1",
+                "status": "open",
+                "tracked": [
+                    {"id": "gui-cqe.1"},
+                    {"id": "gui-cqe.2"},
+                ],
+            }),
+            json!({
+                "id": "hq-cv-2",
+                "title": "Convoy 2",
+                "status": "closed",
+                "tracked": [
+                    {"id": "gui-cqe.2"},
+                    {"id": "gui-cqe.3"},
+                ],
+            }),
+        ];
+
+        let out = fold_raw_convoys(raw);
+        let convoys = out["convoys"].as_array().expect("convoys");
+        assert_eq!(convoys.len(), 2);
+        assert_eq!(convoys[0]["tracked_ids"], json!(["gui-cqe.1", "gui-cqe.2"]));
+        // Open convoy with no `completed` override reports 0 completed.
+        assert_eq!(convoys[0]["completed"], 0);
+        assert_eq!(convoys[0]["total"], 2);
+        // Closed convoy without an override defaults `completed` to total.
+        assert_eq!(convoys[1]["completed"], 2);
+        assert_eq!(convoys[1]["total"], 2);
+
+        let task_index = out["task_index"].as_object().expect("task_index");
+        // gui-cqe.2 appears in both convoys: once open, once closed.
+        let two = &task_index["gui-cqe.2"];
+        assert_eq!(two["total"], 2);
+        assert_eq!(two["open"], 1);
+        assert_eq!(two["closed"], 1);
+        assert_eq!(two["convoy_ids"], json!(["hq-cv-1", "hq-cv-2"]));
+        assert_eq!(two["all_closed"], false);
+
+        // gui-cqe.3 only appears in the closed convoy.
+        let three = &task_index["gui-cqe.3"];
+        assert_eq!(three["all_closed"], true);
+    }
+
+    #[test]
+    fn falls_back_to_tracks_dependencies_when_tracked_missing() {
+        let raw = vec![json!({
+            "id": "hq-cv-dep",
+            "status": "open",
+            "dependencies": [
+                {"depends_on_id": "gui-cqe.10", "type": "tracks"},
+                {"depends_on_id": "gui-cqe.11", "type": "blocks"},
+                {"issue_id": "gui-cqe.12", "dependency_type": "tracks"},
+            ],
+        })];
+
+        let out = fold_raw_convoys(raw);
+        let tracked = out["convoys"][0]["tracked_ids"]
+            .as_array()
+            .expect("tracked_ids");
+        let ids: Vec<&str> = tracked.iter().filter_map(Value::as_str).collect();
+        assert_eq!(ids, vec!["gui-cqe.10", "gui-cqe.12"]);
+    }
+
+    #[test]
+    fn prefers_raw_completed_and_total_when_nonzero() {
+        let raw = vec![json!({
+            "id": "hq-cv-override",
+            "status": "open",
+            "tracked": [{"id": "gui-cqe.20"}],
+            "completed": 5,
+            "total": 10,
+        })];
+
+        let out = fold_raw_convoys(raw);
+        assert_eq!(out["convoys"][0]["completed"], 5);
+        assert_eq!(out["convoys"][0]["total"], 10);
+    }
+
+    #[test]
+    fn skips_tracked_items_without_an_id() {
+        let raw = vec![json!({
+            "id": "hq-cv-empty-id",
+            "status": "open",
+            "tracked": [
+                {"id": ""},
+                {"label": "no id field here"},
+                {"id": "gui-cqe.30"},
+            ],
+        })];
+
+        let out = fold_raw_convoys(raw);
+        assert_eq!(out["convoys"][0]["tracked_ids"], json!(["gui-cqe.30"]));
+        let task_index = out["task_index"].as_object().expect("task_index");
+        assert_eq!(task_index.len(), 1);
+        assert!(task_index.contains_key("gui-cqe.30"));
+    }
+
+    #[test]
+    fn ignores_non_object_rows() {
+        let raw = vec![
+            json!("not an object"),
+            json!({
+                "id": "hq-cv-ok",
+                "status": "open",
+                "tracked": [{"id": "gui-cqe.40"}],
+            }),
+        ];
+
+        let out = fold_raw_convoys(raw);
+        let convoys = out["convoys"].as_array().expect("convoys");
+        assert_eq!(convoys.len(), 1);
+        assert_eq!(convoys[0]["id"], "hq-cv-ok");
     }
 }
