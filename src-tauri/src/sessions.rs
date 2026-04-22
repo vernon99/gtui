@@ -25,7 +25,9 @@ use crate::config::{
     CLAUDE_SESSION_HEAD_BYTES, CLAUDE_SESSION_LIST_TTL, CLAUDE_SESSION_SCAN_LIMIT,
     CODEX_ROLLOUT_HEAD_BYTES, CODEX_ROLLOUT_LIST_TTL, CODEX_ROLLOUT_SCAN_LIMIT,
 };
-use crate::parse::{normalize_path_value, pathbuf_str};
+use crate::parse::{
+    encode_claude_project_dir, match_path_score, normalize_path_value, pathbuf_str,
+};
 
 /// Per-file fingerprint used to decide whether a cached parse is still valid.
 /// The Python port uses `(st_mtime_ns, st_size)` — same shape here so any bug
@@ -191,6 +193,66 @@ pub fn list_recent_claude_sessions(
     cached_file_list(&mut cache.list, now, CLAUDE_SESSION_LIST_TTL, || {
         scan_claude_sessions(claude_root)
     })
+}
+
+/// Root directory Claude Code uses for project-scoped JSONL transcripts.
+pub fn claude_projects_root() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".claude")
+        .join("projects")
+}
+
+/// Return recent Claude session files for a specific working directory when
+/// Claude's encoded project bucket exists, otherwise fall back to the cached
+/// global scan.
+pub fn list_recent_claude_sessions_for_path(
+    cache: &mut ClaudeCache,
+    claude_root: &Path,
+    current_path: &str,
+    now: Instant,
+) -> Vec<PathBuf> {
+    let encoded = encode_claude_project_dir(current_path);
+    if !encoded.is_empty() {
+        let project_dir = claude_root.join(encoded);
+        if project_dir.is_dir() {
+            return glob_recent_jsonl(&project_dir, CLAUDE_SESSION_SCAN_LIMIT, |path| {
+                path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+            });
+        }
+    }
+    list_recent_claude_sessions(cache, claude_root, now)
+}
+
+/// Find the best Claude session for the given working directory.
+pub fn find_claude_session(
+    cache: &mut ClaudeCache,
+    claude_root: &Path,
+    current_path: &str,
+    now: Instant,
+) -> Option<Value> {
+    let mut best_meta: Option<Value> = None;
+    let mut best_score = -1;
+    for path in list_recent_claude_sessions_for_path(cache, claude_root, current_path, now) {
+        let meta = get_claude_session_meta(cache, &path);
+        let cwd = meta.get("cwd").and_then(Value::as_str).unwrap_or("");
+        let score = match_path_score(current_path, cwd);
+        if score < 0 {
+            continue;
+        }
+        let modified_at = meta.get("mtime").and_then(Value::as_f64).unwrap_or(0.0);
+        let best_modified_at = best_meta
+            .as_ref()
+            .and_then(|best| best.get("mtime"))
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        if score > best_score || (score == best_score && modified_at > best_modified_at) {
+            best_score = score;
+            best_meta = Some(meta);
+        }
+    }
+    best_meta
 }
 
 /// Read the head of a file as UTF-8 (lossy), used to extract session metadata
@@ -390,6 +452,346 @@ pub fn cache_claude_transcript(cache: &mut ClaudeCache, path: &Path, view: Value
 pub fn get_cached_claude_transcript(cache: &ClaudeCache, path: &Path) -> Option<Value> {
     let signature = FileSignature::of(path)?;
     cached_signed(&cache.transcript, path, signature)
+}
+
+/// Parse a Claude Code JSONL transcript into the view consumed by the frontend.
+pub fn parse_claude_transcript(cache: &mut ClaudeCache, path: &Path) -> Value {
+    let Some(signature) = FileSignature::of(path) else {
+        return Value::Null;
+    };
+    if let Some(cached) = get_cached_claude_transcript(cache, path) {
+        return cached;
+    }
+
+    let mut items: Vec<Value> = Vec::new();
+    let mut call_map: HashMap<String, Value> = HashMap::new();
+    let mut last_model = String::new();
+    for record in iter_jsonl_records(&read_full(path)) {
+        if record
+            .get("isSidechain")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+
+        let timestamp = record
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let time = format_timestamp_short(&timestamp);
+        let record_type = record.get("type").and_then(Value::as_str).unwrap_or("");
+        let message = record
+            .get("message")
+            .and_then(Value::as_object)
+            .cloned()
+            .map(Value::Object)
+            .unwrap_or(Value::Null);
+        let content = message.get("content").cloned().unwrap_or(Value::Null);
+
+        match record_type {
+            "user" => {
+                if let Some(text) = content
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                {
+                    items.push(json!({
+                        "kind": "user",
+                        "text": text,
+                        "time": time,
+                        "timestamp": timestamp,
+                    }));
+                    continue;
+                }
+                let Some(blocks) = content.as_array() else {
+                    continue;
+                };
+                for block in blocks {
+                    let block_type = block.get("type").and_then(Value::as_str).unwrap_or("");
+                    match block_type {
+                        "tool_result" => {
+                            let call_id = block
+                                .get("tool_use_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string();
+                            let tool_info = call_map.get(&call_id).cloned().unwrap_or(Value::Null);
+                            let tool = tool_info.get("tool").and_then(Value::as_str).unwrap_or("");
+                            let output_text = stringify_claude_tool_output(
+                                record.get("toolUseResult"),
+                                block.get("content"),
+                            );
+                            items.push(json!({
+                                "kind": "tool_output",
+                                "tool": tool,
+                                "summary": summarize_tool_output(&output_text),
+                                "text": excerpt_tool_output(&output_text),
+                                "call_id": call_id,
+                                "is_error": block.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                                "time": time,
+                                "timestamp": timestamp,
+                            }));
+                        }
+                        "text" => {
+                            let text = extract_claude_text_block(block);
+                            if !text.is_empty() {
+                                items.push(json!({
+                                    "kind": "user",
+                                    "text": text,
+                                    "time": time,
+                                    "timestamp": timestamp,
+                                }));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            "assistant" => {
+                let model = message
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if !model.is_empty() {
+                    last_model = model.clone();
+                }
+                if let Some(text) = content
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                {
+                    items.push(json!({
+                        "kind": "assistant",
+                        "text": text,
+                        "model": model,
+                        "time": time,
+                        "timestamp": timestamp,
+                    }));
+                    continue;
+                }
+                let Some(blocks) = content.as_array() else {
+                    continue;
+                };
+                for block in blocks {
+                    let block_type = block.get("type").and_then(Value::as_str).unwrap_or("");
+                    match block_type {
+                        "text" => {
+                            let text = extract_claude_text_block(block);
+                            if !text.is_empty() {
+                                items.push(json!({
+                                    "kind": "assistant",
+                                    "text": text,
+                                    "model": model,
+                                    "time": time,
+                                    "timestamp": timestamp,
+                                }));
+                            }
+                        }
+                        "tool_use" => {
+                            let tool_name = block
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string();
+                            let call_id = block
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string();
+                            let tool_input = block.get("input").unwrap_or(&Value::Null);
+                            let summary = summarize_tool_call(&tool_name, tool_input);
+                            if !call_id.is_empty() {
+                                call_map.insert(
+                                    call_id.clone(),
+                                    json!({"tool": tool_name, "summary": summary}),
+                                );
+                            }
+                            items.push(json!({
+                                "kind": "tool_call",
+                                "tool": tool_name,
+                                "summary": summary,
+                                "call_id": call_id,
+                                "time": time,
+                                "timestamp": timestamp,
+                            }));
+                        }
+                        "thinking" => {
+                            let reasoning_item = json!({
+                                "kind": "reasoning",
+                                "summary": "Thinking...",
+                                "time": time,
+                                "timestamp": timestamp,
+                            });
+                            if items
+                                .last()
+                                .and_then(|item| item.get("kind"))
+                                .and_then(Value::as_str)
+                                == Some("reasoning")
+                            {
+                                if let Some(last) = items.last_mut() {
+                                    *last = reasoning_item;
+                                }
+                            } else {
+                                items.push(reasoning_item);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !items.is_empty() {
+        let trailing_reasoning = items
+            .last()
+            .filter(|item| item.get("kind").and_then(Value::as_str) == Some("reasoning"))
+            .cloned();
+        items.retain(|item| item.get("kind").and_then(Value::as_str) != Some("reasoning"));
+        if let Some(reasoning) = trailing_reasoning {
+            items.push(reasoning);
+        }
+    }
+
+    let view = json!({
+        "available": !items.is_empty(),
+        "provider": "claude",
+        "source": "claude-session",
+        "session_file": pathbuf_str(path),
+        "session_name": path.file_name().and_then(|name| name.to_str()).unwrap_or(""),
+        "model": last_model,
+        "revision": format!("{}:{}", signature.mtime_ns, signature.size),
+        "updated_at": iso_from_mtime_ns(signature.mtime_ns),
+        "items": items,
+    });
+    let _ = cache_claude_transcript(cache, path, view.clone());
+    view
+}
+
+fn extract_claude_text_block(block: &Value) -> String {
+    block
+        .get("text")
+        .and_then(Value::as_str)
+        .or_else(|| block.get("content").and_then(Value::as_str))
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn stringify_claude_tool_output(tool_result: Option<&Value>, fallback: Option<&Value>) -> String {
+    let candidate = tool_result
+        .filter(|value| !value.is_null())
+        .or(fallback)
+        .unwrap_or(&Value::Null);
+    value_to_text(candidate)
+}
+
+fn value_to_text(value: &Value) -> String {
+    if let Some(text) = value.as_str() {
+        return text.to_string();
+    }
+    if let Some(arr) = value.as_array() {
+        let chunks: Vec<String> = arr
+            .iter()
+            .filter_map(|part| {
+                if let Some(text) = part.as_str() {
+                    return Some(text.to_string());
+                }
+                part.get("text")
+                    .and_then(Value::as_str)
+                    .map(String::from)
+                    .or_else(|| {
+                        part.get("content")
+                            .and_then(Value::as_str)
+                            .map(String::from)
+                    })
+            })
+            .filter(|text| !text.trim().is_empty())
+            .collect();
+        if !chunks.is_empty() {
+            return chunks.join("\n\n");
+        }
+    }
+    if value.is_null() {
+        String::new()
+    } else {
+        serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+    }
+}
+
+fn summarize_tool_call(name: &str, arguments: &Value) -> String {
+    if arguments.is_null() {
+        return name.to_string();
+    }
+    let arg_text = if let Some(obj) = arguments.as_object() {
+        obj.iter()
+            .take(4)
+            .map(|(key, value)| format!("{key}={}", clip_text(&value_to_text(value), 48)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else {
+        clip_text(&value_to_text(arguments), 96)
+    };
+    if arg_text.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}({arg_text})")
+    }
+}
+
+fn summarize_tool_output(text: &str) -> String {
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    if first.is_empty() {
+        "Tool returned no output.".to_string()
+    } else {
+        clip_text(first, 140)
+    }
+}
+
+fn excerpt_tool_output(text: &str) -> String {
+    let mut lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+    while lines.first().is_some_and(|line| line.trim().is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    if lines.len() > 18 {
+        let mut clipped = Vec::new();
+        clipped.extend_from_slice(&lines[..8]);
+        clipped.push("...");
+        clipped.extend_from_slice(&lines[lines.len().saturating_sub(8)..]);
+        lines = clipped;
+    }
+    clip_text(&lines.join("\n"), 3200)
+}
+
+fn clip_text(text: &str, limit: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.len() <= limit {
+        return compact;
+    }
+    let keep = limit.saturating_sub(3);
+    let prefix: String = compact.chars().take(keep).collect();
+    format!("{}...", prefix.trim_end())
+}
+
+fn format_timestamp_short(timestamp: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .map(|dt| {
+            dt.with_timezone(&chrono::Local)
+                .format("%H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_default()
 }
 
 fn mtime_secs(mtime_ns: i128) -> f64 {

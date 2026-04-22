@@ -36,7 +36,7 @@ cd src-tauri
 cargo tauri dev        # launches the desktop app with hot reload
 ```
 
-To produce release binaries and installers:
+To produce a release binary and runnable app bundle:
 
 ```bash
 cd src-tauri
@@ -44,8 +44,9 @@ cargo tauri build
 ```
 
 The build outputs land in `src-tauri/target/release/` and, for macOS,
-`src-tauri/target/release/bundle/macos/GTUI.app` plus a `.dmg` image. On Linux
-you get AppImage/Deb, on Windows MSI/NSIS.
+`src-tauri/target/release/bundle/macos/GTUI.app`. Installer images are an
+explicit packaging step; on macOS, run `cargo tauri build --bundles dmg` when
+you need a `.dmg`.
 
 By default GTUI reads the workspace at `~/gt`. Override that with the `GT_ROOT`
 environment variable before launching:

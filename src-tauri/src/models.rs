@@ -119,6 +119,10 @@ pub struct AgentInfo {
     #[serde(default)]
     pub session_name: String,
     #[serde(default)]
+    pub pane_id: String,
+    #[serde(default)]
+    pub current_command: String,
+    #[serde(default)]
     pub hook: Value,
     #[serde(default)]
     pub events: Vec<Value>,

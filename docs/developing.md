@@ -21,7 +21,7 @@ See the [root README](../README.md) for a module-level map of `src-tauri/src/`.
 ```bash
 cd src-tauri
 cargo tauri dev     # development with hot reload
-cargo tauri build   # release build + OS bundle
+cargo tauri build   # release build + runnable app bundle
 ```
 
 Both commands read `src-tauri/tauri.conf.json`. `frontendDist` points at `../src`,
@@ -123,9 +123,15 @@ Outputs:
 
 - `src-tauri/target/release/gtui` — raw binary.
 - `src-tauri/target/release/bundle/macos/GTUI.app` — macOS app bundle.
-- `src-tauri/target/release/bundle/dmg/GTUI_<version>_<arch>.dmg` — DMG.
-- On Linux: AppImage + `.deb` under `bundle/appimage/` and `bundle/deb/`.
-- On Windows: MSI + NSIS installer under `bundle/msi/` and `bundle/nsis/`.
+
+Installer artifacts are generated separately from the normal run path. On
+macOS:
+
+```bash
+cargo tauri build --bundles dmg
+```
+
+That writes `src-tauri/target/release/bundle/dmg/GTUI_<version>_<arch>.dmg`.
 
 The release profile is configured in `src-tauri/Cargo.toml` under
 `[profile.release]` (LTO, single codegen unit, `strip = true`, `panic = abort`).

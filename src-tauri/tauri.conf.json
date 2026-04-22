@@ -29,7 +29,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["app"],
     "category": "DeveloperTool",
     "shortDescription": "Gas Town workspace dashboard",
     "longDescription": "GTUI is a desktop dashboard for a Gas Town workspace, showing task spine, agent activity, git memory, and live intervention hooks.",

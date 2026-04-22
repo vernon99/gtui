@@ -24,7 +24,9 @@ use crate::models::{
     default_status_legend, Activity, AgentInfo, Metrics, StatusSummary, Timings, WorkspaceSnapshot,
 };
 use crate::parse::{now_iso, parse_feed, parse_status_summary};
-use crate::sessions::{ClaudeCache, CodexCache};
+use crate::sessions::{
+    claude_projects_root, find_claude_session, parse_claude_transcript, ClaudeCache, CodexCache,
+};
 
 /// Maximum number of most-recent actions retained on the snapshot store.
 pub const ACTION_HISTORY_LIMIT: usize = 24;
@@ -521,22 +523,24 @@ impl SnapshotStore {
     }
 
     /// Port of `SnapshotStore.get_terminal_state`. Returns the agent snapshot
-    /// plus a captured pane transcript when tmux is reachable. Until the
-    /// upstream agent collector lands, this returns `Unknown terminal target`
-    /// for every call — matching what the Python server would do before
-    /// agents are populated.
+    /// plus a Claude transcript view when available, otherwise a captured pane
+    /// transcript when tmux is reachable.
     pub async fn get_terminal_state(&self, target: &str) -> Result<Value, String> {
         let agent = self
             .get_agent(target)
             .ok_or_else(|| format!("Unknown terminal target: {target}"))?;
 
         let tmux_socket = self.get_tmux_socket();
-        let pane_id = agent
-            .hook
-            .get("pane_id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+        let pane_id = if !agent.pane_id.is_empty() {
+            agent.pane_id.clone()
+        } else {
+            agent
+                .hook
+                .get("pane_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
         let tmux_target = if !pane_id.is_empty() {
             pane_id.clone()
         } else {
@@ -545,7 +549,14 @@ impl SnapshotStore {
 
         let mut log_lines: Vec<Value> = Vec::new();
         let mut capture_error = String::new();
-        if !tmux_socket.is_empty() && !tmux_target.is_empty() {
+        let (transcript_view, claude_view) = self.get_claude_view_for_agent(&agent);
+        if !tmux_socket.is_empty()
+            && !tmux_target.is_empty()
+            && !transcript_view
+                .get("available")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        {
             let capture = run_command(
                 &[
                     "tmux",
@@ -586,13 +597,74 @@ impl SnapshotStore {
             "current_path": agent.current_path,
             "session_name": agent.session_name,
             "pane_id": pane_id,
+            "current_command": agent.current_command,
             "hook": agent.hook,
             "events": agent.events,
             "log_lines": log_lines,
+            "claude_view": claude_view,
+            "transcript_view": transcript_view,
+            "render_mode": if transcript_view.get("available").and_then(Value::as_bool).unwrap_or(false) { "claude" } else { "terminal" },
             "services": services,
             "capture_error": capture_error,
             "generated_at": now_iso(),
         }))
+    }
+
+    fn get_claude_view_for_agent(&self, agent: &AgentInfo) -> (Value, Value) {
+        if agent.current_path.is_empty() {
+            return (json!({}), json!({}));
+        }
+        let command = agent.current_command.to_ascii_lowercase();
+        let looks_like_claude = command.is_empty()
+            || command == "node"
+            || command == "claude"
+            || command == "claude.exe";
+        if !looks_like_claude {
+            return (json!({}), json!({}));
+        }
+
+        let claude_root = claude_projects_root();
+        let view = self.with_claude_cache(|cache| {
+            let session =
+                find_claude_session(cache, &claude_root, &agent.current_path, Instant::now())?;
+            let path_text = session.get("path").and_then(Value::as_str)?;
+            let path = PathBuf::from(path_text);
+            let mut view = parse_claude_transcript(cache, &path);
+            if !view
+                .get("available")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return None;
+            }
+            if let Some(obj) = view.as_object_mut() {
+                obj.insert(
+                    "cwd".into(),
+                    Value::String(
+                        session
+                            .get("cwd")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                    ),
+                );
+                obj.insert(
+                    "session_id".into(),
+                    Value::String(
+                        session
+                            .get("session_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                    ),
+                );
+            }
+            Some(view)
+        });
+        match view {
+            Some(view) => (view.clone(), view),
+            None => (json!({}), json!({})),
+        }
     }
 
     /// Port of `SnapshotStore.write_terminal`. Sends keystrokes to the
@@ -610,12 +682,16 @@ impl SnapshotStore {
             ));
         }
         let tmux_socket = self.get_tmux_socket();
-        let pane_id = agent
-            .hook
-            .get("pane_id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+        let pane_id = if !agent.pane_id.is_empty() {
+            agent.pane_id
+        } else {
+            agent
+                .hook
+                .get("pane_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
         let tmux_target = if !pane_id.is_empty() {
             pane_id
         } else {
@@ -812,6 +888,9 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
         Vec::new()
     };
 
+    let (agents, agent_errors, agent_ms) = collect_agents(gt_root, &status_summary, &crews).await;
+    errors.extend(agent_errors);
+
     // Downstream collectors are stubbed for this bead — future ports will
     // flesh these out. We keep the JSON shape the frontend already consumes.
     let graph = json!({
@@ -831,6 +910,7 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
     let alerts = derive_alerts(&status_summary, &crews);
 
     let summary = Metrics {
+        active_agents: agents.iter().filter(|agent| agent.has_session).count() as u32,
         command_errors: errors.len() as u32,
         ..Metrics::default()
     };
@@ -855,16 +935,213 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
         git,
         convoys,
         crews,
-        agents: Vec::new(),
+        agents,
         stores: Vec::new(),
         actions: actions_for_snapshot,
         errors,
         timings: Timings {
             gt_commands_ms,
+            agent_commands_ms: agent_ms,
             ..Timings::default()
         },
     }
     .tag_feed(feed_events)
+}
+
+async fn collect_agents(
+    gt_root: &Path,
+    status_summary: &StatusSummary,
+    crews: &[Value],
+) -> (Vec<AgentInfo>, Vec<Value>, u64) {
+    let (mut agents, errors, duration_ms) =
+        collect_tmux_agents(gt_root, &status_summary.tmux_socket).await;
+
+    for crew in crews {
+        let rig = crew.get("rig").and_then(Value::as_str).unwrap_or("");
+        let name = crew.get("name").and_then(Value::as_str).unwrap_or("");
+        if rig.is_empty() || name.is_empty() {
+            continue;
+        }
+        let target = format!("{rig}/crew/{name}");
+        let mut existing = agents
+            .iter()
+            .position(|agent| agent.target == target)
+            .map(|idx| agents.remove(idx))
+            .unwrap_or_default();
+        existing.target = target.clone();
+        existing.label = target;
+        existing.role = "crew".into();
+        existing.scope = rig.into();
+        if existing.kind.is_empty() {
+            existing.kind = "external".into();
+        }
+        if existing.current_path.is_empty() {
+            existing.current_path = crew
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+        }
+        existing.has_session = existing.has_session
+            || crew
+                .get("has_session")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        existing.crew = crew.clone();
+        agents.push(existing);
+    }
+
+    agents.sort_by(|a, b| {
+        (a.scope.as_str(), a.role.as_str(), a.target.as_str()).cmp(&(
+            b.scope.as_str(),
+            b.role.as_str(),
+            b.target.as_str(),
+        ))
+    });
+    (agents, errors, duration_ms)
+}
+
+async fn collect_tmux_agents(
+    gt_root: &Path,
+    tmux_socket: &str,
+) -> (Vec<AgentInfo>, Vec<Value>, u64) {
+    if tmux_socket.is_empty() {
+        return (Vec::new(), Vec::new(), 0);
+    }
+    let result = run_command(
+        &[
+            "tmux",
+            "-L",
+            tmux_socket,
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}|#{window_name}|#{pane_id}|#{pane_current_path}|#{pane_current_command}",
+        ],
+        gt_root,
+        RunOptions::default().with_timeout(Duration::from_secs(2)),
+    )
+    .await;
+    let duration_ms = result.duration_ms;
+    if !result.ok {
+        return (Vec::new(), vec![result.to_error()], duration_ms);
+    }
+
+    let mut agents = Vec::new();
+    let text = result.data.as_ref().and_then(Value::as_str).unwrap_or("");
+    for line in text.lines() {
+        let mut parts = line.splitn(5, '|');
+        let session_name = parts.next().unwrap_or("").to_string();
+        let _window_name = parts.next().unwrap_or("");
+        let pane_id = parts.next().unwrap_or("").to_string();
+        let pane_path = parts.next().unwrap_or("").to_string();
+        let pane_command = parts.next().unwrap_or("").to_string();
+        let Some(target) = parse_tmux_target(gt_root, &pane_path) else {
+            continue;
+        };
+        if target.role == "boot" {
+            continue;
+        }
+        agents.push(AgentInfo {
+            target: target.target,
+            label: target.label,
+            role: target.role,
+            scope: target.scope,
+            kind: "tmux".into(),
+            has_session: true,
+            current_path: pane_path,
+            session_name,
+            pane_id,
+            current_command: pane_command,
+            ..AgentInfo::default()
+        });
+    }
+    (agents, Vec::new(), duration_ms)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TmuxTarget {
+    target: String,
+    role: String,
+    scope: String,
+    label: String,
+}
+
+fn parse_tmux_target(gt_root: &Path, pane_path: &str) -> Option<TmuxTarget> {
+    let root = std::fs::canonicalize(gt_root).ok()?;
+    let path = std::fs::canonicalize(pane_path).ok()?;
+    let relative = path.strip_prefix(root).ok()?;
+    let parts: Vec<String> = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+
+    if parts[0] == "mayor" {
+        return Some(TmuxTarget {
+            target: "mayor".into(),
+            role: "mayor".into(),
+            scope: "hq".into(),
+            label: "mayor".into(),
+        });
+    }
+    if parts[0] == "deacon" {
+        if parts.len() >= 3 && parts[1] == "dogs" && parts[2] == "boot" {
+            return Some(TmuxTarget {
+                target: "boot".into(),
+                role: "boot".into(),
+                scope: "hq".into(),
+                label: "boot".into(),
+            });
+        }
+        return Some(TmuxTarget {
+            target: "deacon".into(),
+            role: "deacon".into(),
+            scope: "hq".into(),
+            label: "deacon".into(),
+        });
+    }
+    if parts.len() >= 2 && parts[1] == "witness" {
+        let rig = &parts[0];
+        return Some(TmuxTarget {
+            target: format!("{rig}/witness"),
+            role: "witness".into(),
+            scope: rig.clone(),
+            label: format!("{rig}/witness"),
+        });
+    }
+    if parts.len() >= 3 && parts[1] == "refinery" && parts[2] == "rig" {
+        let rig = &parts[0];
+        return Some(TmuxTarget {
+            target: format!("{rig}/refinery"),
+            role: "refinery".into(),
+            scope: rig.clone(),
+            label: format!("{rig}/refinery"),
+        });
+    }
+    if parts.len() >= 3 && parts[1] == "polecats" {
+        let rig = &parts[0];
+        let name = &parts[2];
+        return Some(TmuxTarget {
+            target: format!("{rig}/polecats/{name}"),
+            role: "polecat".into(),
+            scope: rig.clone(),
+            label: format!("{rig}/polecats/{name}"),
+        });
+    }
+    if parts.len() >= 3 && parts[1] == "crew" {
+        let rig = &parts[0];
+        let name = &parts[2];
+        return Some(TmuxTarget {
+            target: format!("{rig}/crew/{name}"),
+            role: "crew".into(),
+            scope: rig.clone(),
+            label: format!("{rig}/crew/{name}"),
+        });
+    }
+    None
 }
 
 /// Alerts ported from the Python `build_snapshot` logic that are cheap without
