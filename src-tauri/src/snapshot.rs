@@ -4,10 +4,9 @@
 //! five coarse `gt` CLI calls are fanned out in parallel via `tokio::join!`
 //! (Python's `run_command` is blocking and sequential), but the downstream
 //! collectors (`collect_agents`, `collect_bead_data`, `collect_git_memory`,
-//! `collect_convoy_data`) run inline; `finalize_graph` and
-//! `build_activity_groups` are still stubbed as follow-on beads. Everything
-//! the store *does* own — locks, polling loop, action ring buffer, caches —
-//! is in place.
+//! `collect_convoy_data`, `finalize_graph`) run inline; `build_activity_groups`
+//! is still stubbed as a follow-on bead. Everything the store *does* own —
+//! locks, polling loop, action ring buffer, caches — is in place.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
@@ -1071,12 +1070,9 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
     derived_status_counts.insert("done".into(), done_tasks);
     derived_status_counts.insert("ice".into(), ice_tasks);
 
-    // `finalize_graph` still layers linked commits onto the nodes below in a
-    // later bead; everything else upstream is live.
-    let graph = json!({
-        "nodes": bead_data.nodes.clone(),
-        "edges": bead_data.edges.clone(),
-    });
+    // Layer linked commits, commit nodes/edges, and the "interesting" filter
+    // onto the raw bead graph. Mirrors `finalize_graph` in `webui/server.py`.
+    let graph = finalize_graph(&bead_data, &git_memory, &convoys);
     let repo_count = git_memory.repos.len() as u32;
     let git = git_memory.into_json();
 
@@ -2668,6 +2664,259 @@ pub async fn collect_convoy_data(gt_root: &Path) -> (Value, Vec<Value>, u64) {
         Vec::new(),
         duration_ms,
     )
+}
+
+/// Rust port of `finalize_graph` in `webui/server.py`. Takes the raw
+/// `bead_data` graph (nodes + edges) and layers on:
+///
+/// 1. `linked_commits` (up to three `short_sha`s) and `linked_commit_count`
+///    on every task node, sourced from `git_memory.task_memory`.
+/// 2. Synthetic `commit:<sha>` nodes for each commit that mentions a node's
+///    task id, plus a `commit` edge from the task node to the commit node.
+///    Commit nodes carry enough context (`sha`, `short_sha`, `repo_id`,
+///    `repo_label`, `branch`, `available_local`, `scope`, `updated_at`,
+///    `parent`) for the graph renderer to badge them correctly.
+/// 3. An "interesting" filter: only nodes that are on an edge, referenced by
+///    a convoy's `task_index`, carry agent hooks, have linked commits, have
+///    a running/stuck `ui_status`, or are system nodes in a live state
+///    (`ready`/`running`/`stuck`) survive. Commit nodes survive only when
+///    their parent task survived. Edges are then pruned to endpoints that
+///    are still present.
+///
+/// The output shape is `{nodes, edges}` with the same field schema the Python
+/// port returned, so downstream consumers (activity grouping in gui-cqe.10,
+/// the Tauri IPC surface, the frontend graph renderer) need no changes.
+fn finalize_graph(bead_data: &BeadData, git_memory: &GitMemory, convoys: &Value) -> Value {
+    let mut nodes: Vec<Value> = bead_data.nodes.clone();
+    let mut edges: Vec<Value> = bead_data.edges.clone();
+
+    let mut node_ids: HashSet<String> = nodes
+        .iter()
+        .filter_map(|n| n.get("id").and_then(Value::as_str).map(String::from))
+        .collect();
+    let node_scope_map: HashMap<String, String> = nodes
+        .iter()
+        .filter_map(|n| {
+            let id = n.get("id").and_then(Value::as_str)?.to_string();
+            let scope = n
+                .get("scope")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            Some((id, scope))
+        })
+        .collect();
+
+    let convoy_task_ids: HashSet<String> = convoys
+        .get("task_index")
+        .and_then(Value::as_object)
+        .map(|obj| obj.keys().filter(|k| !k.is_empty()).cloned().collect())
+        .unwrap_or_default();
+
+    // (1) Attach linked_commits / linked_commit_count to every bead-data node.
+    for node in nodes.iter_mut() {
+        let id = node
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let entries = git_memory.task_memory.get(&id);
+        let (linked_commits, count) = match entries {
+            Some(entries) => {
+                let commits: Vec<Value> = entries
+                    .iter()
+                    .take(3)
+                    .map(|e| {
+                        Value::String(
+                            e.get("short_sha")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string(),
+                        )
+                    })
+                    .collect();
+                (Value::Array(commits), entries.len() as u64)
+            }
+            None => (Value::Array(Vec::new()), 0),
+        };
+        if let Some(obj) = node.as_object_mut() {
+            obj.insert("linked_commits".into(), linked_commits);
+            obj.insert("linked_commit_count".into(), Value::Number(count.into()));
+        }
+    }
+
+    // (2) Build commit nodes + commit edges. Dedup edges with the existing set
+    //     so a task that already has an edge to a commit (shouldn't happen
+    //     normally, but Python defends it) isn't double-counted.
+    let mut edge_keys: HashSet<(String, String, String)> = edges
+        .iter()
+        .filter_map(|e| {
+            let source = e.get("source").and_then(Value::as_str)?.to_string();
+            let target = e.get("target").and_then(Value::as_str)?.to_string();
+            let kind = e.get("kind").and_then(Value::as_str)?.to_string();
+            Some((source, target, kind))
+        })
+        .collect();
+
+    let mut commit_nodes: Vec<Value> = Vec::new();
+    for (task_id, entries) in git_memory.task_memory.iter() {
+        if !node_ids.contains(task_id) {
+            continue;
+        }
+        for entry in entries {
+            let sha = entry.get("sha").and_then(Value::as_str).unwrap_or("");
+            if sha.is_empty() {
+                continue;
+            }
+            let commit_node_id = format!("commit:{}", sha);
+            if !node_ids.contains(&commit_node_id) {
+                let short_sha = entry.get("short_sha").and_then(Value::as_str).unwrap_or("");
+                let subject = entry.get("subject").and_then(Value::as_str).unwrap_or("");
+                let title = if !subject.is_empty() {
+                    subject.to_string()
+                } else {
+                    format!("Commit {}", short_sha)
+                };
+                let entry_scope = entry.get("scope").and_then(Value::as_str).unwrap_or("");
+                let scope = if !entry_scope.is_empty() {
+                    entry_scope.to_string()
+                } else {
+                    node_scope_map.get(task_id).cloned().unwrap_or_default()
+                };
+                commit_nodes.push(json!({
+                    "id": commit_node_id.clone(),
+                    "kind": "commit",
+                    "title": title,
+                    "description": "",
+                    "status": "memory",
+                    "ui_status": "memory",
+                    "priority": Value::Null,
+                    "type": "commit",
+                    "owner": "",
+                    "assignee": "",
+                    "created_at": "",
+                    "updated_at": entry.get("committed_at").and_then(Value::as_str).unwrap_or(""),
+                    "closed_at": "",
+                    "parent": task_id.as_str(),
+                    "labels": Vec::<Value>::new(),
+                    "dependency_count": 0,
+                    "dependent_count": 0,
+                    "blocked_by_count": 0,
+                    "blocked_by": Vec::<Value>::new(),
+                    "is_system": false,
+                    "scope": scope,
+                    "agent_targets": Vec::<Value>::new(),
+                    "linked_commits": Vec::<Value>::new(),
+                    "linked_commit_count": 0,
+                    "sha": sha,
+                    "short_sha": short_sha,
+                    "repo_id": entry.get("repo_id").and_then(Value::as_str).unwrap_or(""),
+                    "repo_label": entry.get("repo_label").and_then(Value::as_str).unwrap_or(""),
+                    "branch": entry.get("branch").and_then(Value::as_str).unwrap_or(""),
+                    "available_local": entry
+                        .get("available_local")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                }));
+                node_ids.insert(commit_node_id.clone());
+            }
+            let edge_key = (
+                task_id.clone(),
+                commit_node_id.clone(),
+                "commit".to_string(),
+            );
+            if edge_keys.insert(edge_key) {
+                edges.push(json!({
+                    "source": task_id.as_str(),
+                    "target": commit_node_id,
+                    "kind": "commit",
+                }));
+            }
+        }
+    }
+
+    nodes.extend(commit_nodes);
+
+    // (3) Compute the "interesting" set: edge endpoints, convoy-tracked tasks,
+    //     nodes with agent hooks, nodes with linked commits, live task nodes
+    //     (running/stuck), and system nodes in a live state.
+    let mut interesting_ids: HashSet<String> = HashSet::new();
+    for edge in &edges {
+        if let Some(s) = edge.get("source").and_then(Value::as_str) {
+            interesting_ids.insert(s.to_string());
+        }
+        if let Some(t) = edge.get("target").and_then(Value::as_str) {
+            interesting_ids.insert(t.to_string());
+        }
+    }
+    interesting_ids.extend(convoy_task_ids);
+    for node in &nodes {
+        let Some(id) = node.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if id.is_empty() {
+            continue;
+        }
+        let has_agents = node
+            .get("agent_targets")
+            .and_then(Value::as_array)
+            .map(|a| !a.is_empty())
+            .unwrap_or(false);
+        let has_commits = node
+            .get("linked_commit_count")
+            .and_then(Value::as_u64)
+            .map(|n| n > 0)
+            .unwrap_or(false);
+        let ui_status = node.get("ui_status").and_then(Value::as_str).unwrap_or("");
+        let is_system = node
+            .get("is_system")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let running_or_stuck = matches!(ui_status, "running" | "stuck");
+        let system_live = is_system && matches!(ui_status, "ready" | "running" | "stuck");
+        if has_agents || has_commits || running_or_stuck || system_live {
+            interesting_ids.insert(id.to_string());
+        }
+    }
+
+    // (4) Filter nodes, then prune edges to surviving endpoints. Commit nodes
+    //     stay only when their parent task stayed.
+    let mut kept_ids: HashSet<String> = HashSet::new();
+    let filtered_nodes: Vec<Value> = nodes
+        .into_iter()
+        .filter(|node| {
+            let kind = node.get("kind").and_then(Value::as_str).unwrap_or("");
+            let id = node
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let keep = if kind == "commit" {
+                let parent = node.get("parent").and_then(Value::as_str).unwrap_or("");
+                !parent.is_empty() && interesting_ids.contains(parent)
+            } else {
+                interesting_ids.contains(&id)
+            };
+            if keep && !id.is_empty() {
+                kept_ids.insert(id);
+            }
+            keep
+        })
+        .collect();
+
+    let filtered_edges: Vec<Value> = edges
+        .into_iter()
+        .filter(|e| {
+            let s = e.get("source").and_then(Value::as_str).unwrap_or("");
+            let t = e.get("target").and_then(Value::as_str).unwrap_or("");
+            kept_ids.contains(s) && kept_ids.contains(t)
+        })
+        .collect();
+
+    json!({
+        "nodes": filtered_nodes,
+        "edges": filtered_edges,
+    })
 }
 
 /// Port of `collect_polecats` in `webui/server.py`. Invokes
@@ -4561,5 +4810,300 @@ mod convoy_tests {
         let convoys = out["convoys"].as_array().expect("convoys");
         assert_eq!(convoys.len(), 1);
         assert_eq!(convoys[0]["id"], "hq-cv-ok");
+    }
+}
+
+#[cfg(test)]
+mod finalize_graph_tests {
+    use super::*;
+
+    fn task_node(id: &str, ui_status: &str, extra: Value) -> Value {
+        let mut node = json!({
+            "id": id,
+            "title": id,
+            "description": "",
+            "status": "open",
+            "ui_status": ui_status,
+            "priority": Value::Null,
+            "type": "task",
+            "owner": "",
+            "assignee": "",
+            "created_at": "",
+            "updated_at": "",
+            "closed_at": "",
+            "parent": "",
+            "labels": [],
+            "dependency_count": 0,
+            "dependent_count": 0,
+            "blocked_by_count": 0,
+            "blocked_by": [],
+            "is_system": false,
+            "kind": "task",
+            "scope": "hq",
+            "agent_targets": [],
+        });
+        if let (Some(obj), Some(ext)) = (node.as_object_mut(), extra.as_object()) {
+            for (k, v) in ext {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+        node
+    }
+
+    fn memory_entry(sha: &str, subject: &str) -> Value {
+        json!({
+            "source": "commit-message",
+            "repo_id": "repo-1",
+            "repo_label": "Town Root",
+            "sha": sha,
+            "short_sha": &sha[..sha.len().min(7)],
+            "subject": subject,
+            "committed_at": "2026-04-22T10:00:00Z",
+            "scope": "hq",
+            "branch": "main",
+            "available_local": true,
+        })
+    }
+
+    #[test]
+    fn layers_linked_commits_and_creates_commit_nodes() {
+        let bead_data = BeadData {
+            nodes: vec![task_node("gui-cqe.9", "running", json!({}))],
+            edges: vec![],
+            ..BeadData::default()
+        };
+
+        let mut task_memory = BTreeMap::new();
+        task_memory.insert(
+            "gui-cqe.9".to_string(),
+            vec![
+                memory_entry("abc1234xyz", "Port graph finalization"),
+                memory_entry("def5678uvw", "Fixup"),
+            ],
+        );
+        let git_memory = GitMemory {
+            task_memory,
+            ..GitMemory::default()
+        };
+
+        let convoys = json!({"convoys": [], "task_index": {}});
+        let graph = finalize_graph(&bead_data, &git_memory, &convoys);
+
+        let nodes = graph["nodes"].as_array().expect("nodes");
+        assert_eq!(nodes.len(), 3, "task node + two commit nodes survive");
+
+        let task = nodes.iter().find(|n| n["id"] == "gui-cqe.9").expect("task");
+        assert_eq!(task["linked_commit_count"], 2);
+        let linked = task["linked_commits"].as_array().expect("linked_commits");
+        assert_eq!(linked.len(), 2);
+        assert_eq!(linked[0], "abc1234");
+
+        let commit = nodes
+            .iter()
+            .find(|n| n["id"] == "commit:abc1234xyz")
+            .expect("commit node");
+        assert_eq!(commit["kind"], "commit");
+        assert_eq!(commit["ui_status"], "memory");
+        assert_eq!(commit["parent"], "gui-cqe.9");
+        assert_eq!(commit["sha"], "abc1234xyz");
+        assert_eq!(commit["available_local"], true);
+
+        let edges = graph["edges"].as_array().expect("edges");
+        assert_eq!(edges.len(), 2);
+        assert!(edges.iter().all(|e| e["kind"] == "commit"));
+    }
+
+    #[test]
+    fn caps_linked_commits_at_three() {
+        let bead_data = BeadData {
+            nodes: vec![task_node("t-1", "running", json!({}))],
+            edges: vec![],
+            ..BeadData::default()
+        };
+        let mut task_memory = BTreeMap::new();
+        task_memory.insert(
+            "t-1".to_string(),
+            (0..5)
+                .map(|i| memory_entry(&format!("sha{:03}aaa", i), "s"))
+                .collect(),
+        );
+        let git_memory = GitMemory {
+            task_memory,
+            ..GitMemory::default()
+        };
+        let graph = finalize_graph(&bead_data, &git_memory, &json!({"task_index": {}}));
+        let task = graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == "t-1")
+            .unwrap();
+        assert_eq!(task["linked_commit_count"], 5);
+        assert_eq!(task["linked_commits"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn filters_uninteresting_nodes_but_keeps_convoy_and_edge_endpoints() {
+        // Three nodes: one connected by an edge, one in a convoy, one boring.
+        let bead_data = BeadData {
+            nodes: vec![
+                task_node("edge-src", "ready", json!({})),
+                task_node("edge-dst", "ready", json!({})),
+                task_node("in-convoy", "ready", json!({})),
+                task_node("boring", "ready", json!({})),
+            ],
+            edges: vec![json!({
+                "source": "edge-src",
+                "target": "edge-dst",
+                "kind": "dependency",
+            })],
+            ..BeadData::default()
+        };
+        let git_memory = GitMemory::default();
+        let convoys = json!({
+            "convoys": [],
+            "task_index": {"in-convoy": {"total": 1, "open": 1, "closed": 0}},
+        });
+        let graph = finalize_graph(&bead_data, &git_memory, &convoys);
+        let ids: std::collections::HashSet<String> = graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_str().unwrap().to_string())
+            .collect();
+        assert!(ids.contains("edge-src"));
+        assert!(ids.contains("edge-dst"));
+        assert!(ids.contains("in-convoy"));
+        assert!(!ids.contains("boring"), "boring node should be filtered");
+        // Edge survives because both endpoints are in the kept set.
+        assert_eq!(graph["edges"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn keeps_live_and_hooked_nodes_even_without_edges() {
+        let bead_data = BeadData {
+            nodes: vec![
+                task_node("running-alone", "running", json!({})),
+                task_node("stuck-alone", "stuck", json!({})),
+                task_node(
+                    "hooked-alone",
+                    "ready",
+                    json!({"agent_targets": ["gtui/polecats/furiosa"]}),
+                ),
+                task_node("system-ready", "ready", json!({"is_system": true})),
+                task_node("system-ice", "ice", json!({"is_system": true})),
+                task_node("boring", "ready", json!({})),
+            ],
+            edges: vec![],
+            ..BeadData::default()
+        };
+        let graph = finalize_graph(
+            &bead_data,
+            &GitMemory::default(),
+            &json!({"task_index": {}}),
+        );
+        let ids: std::collections::HashSet<String> = graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_str().unwrap().to_string())
+            .collect();
+        assert!(ids.contains("running-alone"));
+        assert!(ids.contains("stuck-alone"));
+        assert!(ids.contains("hooked-alone"));
+        assert!(ids.contains("system-ready"));
+        assert!(!ids.contains("system-ice"), "ice system node is filtered");
+        assert!(!ids.contains("boring"));
+    }
+
+    #[test]
+    fn drops_commit_node_when_parent_is_filtered() {
+        // Task isn't "interesting" on its own (ready, no agents, no edges, not
+        // in a convoy). But it has a linked commit → linked_commit_count > 0
+        // makes it interesting, so both the task and the commit survive.
+        let bead_data = BeadData {
+            nodes: vec![task_node("t-with-commit", "ready", json!({}))],
+            edges: vec![],
+            ..BeadData::default()
+        };
+        let mut task_memory = BTreeMap::new();
+        task_memory.insert(
+            "t-with-commit".to_string(),
+            vec![memory_entry("ffffffff", "subject")],
+        );
+        let git_memory = GitMemory {
+            task_memory,
+            ..GitMemory::default()
+        };
+        let graph = finalize_graph(&bead_data, &git_memory, &json!({"task_index": {}}));
+        let ids: std::collections::HashSet<String> = graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_str().unwrap().to_string())
+            .collect();
+        assert!(ids.contains("t-with-commit"));
+        assert!(ids.contains("commit:ffffffff"));
+    }
+
+    #[test]
+    fn skips_commit_entries_with_empty_sha() {
+        let bead_data = BeadData {
+            nodes: vec![task_node("t-1", "running", json!({}))],
+            edges: vec![],
+            ..BeadData::default()
+        };
+        let mut task_memory = BTreeMap::new();
+        task_memory.insert(
+            "t-1".to_string(),
+            vec![json!({
+                "source": "merge-bead",
+                "sha": "",
+                "short_sha": "",
+                "subject": "no sha",
+                "committed_at": "",
+                "scope": "",
+                "branch": "",
+                "available_local": false,
+            })],
+        );
+        let git_memory = GitMemory {
+            task_memory,
+            ..GitMemory::default()
+        };
+        let graph = finalize_graph(&bead_data, &git_memory, &json!({"task_index": {}}));
+        let commit_count = graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| n["kind"] == "commit")
+            .count();
+        assert_eq!(commit_count, 0, "empty-sha entries must not become nodes");
+        assert_eq!(graph["edges"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn commit_node_falls_back_to_task_scope_when_entry_scope_is_empty() {
+        let bead_data = BeadData {
+            nodes: vec![task_node("t-1", "running", json!({"scope": "gastown"}))],
+            edges: vec![],
+            ..BeadData::default()
+        };
+        let mut task_memory = BTreeMap::new();
+        let mut entry = memory_entry("cafebabe", "s");
+        entry["scope"] = Value::String(String::new());
+        task_memory.insert("t-1".to_string(), vec![entry]);
+        let git_memory = GitMemory {
+            task_memory,
+            ..GitMemory::default()
+        };
+        let graph = finalize_graph(&bead_data, &git_memory, &json!({"task_index": {}}));
+        let commit = graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["kind"] == "commit")
+            .expect("commit node present");
+        assert_eq!(commit["scope"], "gastown");
     }
 }
