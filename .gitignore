@@ -13,3 +13,14 @@ logs/
 .claude/
 .runtime/
 /CLAUDE.md
+
+# Rust / Tauri build artifacts
+target/
+src-tauri/gen/
+src-tauri/target/
+
+# Node (not currently used, but reserved for future frontend tooling)
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
