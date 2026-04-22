@@ -342,28 +342,9 @@ import {
       });
     }
 
-    function terminalRolePriority(role) {
-      if (app.selectedScope === "all" || app.selectedScope === "hq") {
-        return { mayor: 0, deacon: 1, witness: 2, refinery: 3, crew: 4, polecat: 5 }[role] ?? 9;
-      }
-      return { witness: 0, refinery: 1, crew: 2, mayor: 3, deacon: 4, polecat: 5 }[role] ?? 9;
-    }
-
     function getPrimaryTerminalAgent() {
-      const preferred = visibleAgents(false);
-      const fallback = visiblePolecats();
-      const primaryPool = preferred.length ? preferred : fallback;
-      if (!primaryPool.length) return null;
-
-      const livePool = primaryPool.filter((agent) => agent.has_session || agent.events?.length);
-      const candidates = livePool.length ? livePool : primaryPool;
-      return [...candidates].sort((a, b) => {
-        const aRank = terminalRolePriority(a.role);
-        const bRank = terminalRolePriority(b.role);
-        return aRank - bRank
-          || (b.has_session ? 1 : 0) - (a.has_session ? 1 : 0)
-          || a.target.localeCompare(b.target);
-      })[0] || null;
+      const agents = app.snapshot?.agents || [];
+      return agents.find((agent) => agent.role === "mayor" || agent.target === "mayor") || null;
     }
 
     function getPrimaryTerminalViewAgent() {
@@ -1813,7 +1794,6 @@ returncode: ${esc(error.returncode ?? "")}</pre>
     document.getElementById("refresh-button").addEventListener("click", () => fetchSnapshot(true));
     document.getElementById("scope-select").addEventListener("change", (event) => {
       app.selectedScope = event.target.value;
-      app.primaryTerminal = null;
       ensureSelection();
       renderAll();
       fetchPrimaryTerminal(true);
