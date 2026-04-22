@@ -14,6 +14,14 @@ standard-library backend from `server.py`.
 - Light intervention hooks for retrying a running task, pausing agents, nudging,
   and sending instructions to active terminals.
 
+## Screenshots
+
+The screenshots below use representative sample data.
+
+![GTUI task spine view](docs/assets/task-spine.png)
+
+![GTUI mayor Claude transcript view](docs/assets/mayor-chat.png)
+
 ## Requirements
 
 - Python 3.9 or newer.
