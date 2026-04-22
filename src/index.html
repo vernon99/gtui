@@ -1,34 +1,213 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Gas Town UI</title>
-    <style>
-      html, body {
-        margin: 0;
-        padding: 0;
-        height: 100%;
-        background: #0f1115;
-        color: #e6e8ea;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      }
-      main {
-        height: 100%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        flex-direction: column;
-        gap: 0.5rem;
-      }
-      h1 { margin: 0; font-weight: 600; }
-      p  { margin: 0; opacity: 0.6; font-size: 0.9rem; }
-    </style>
-  </head>
-  <body>
-    <main>
-      <h1>Gas Town UI</h1>
-      <p>Tauri scaffold — frontend will be ported in a later task.</p>
-    </main>
-  </body>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GTUI</title>
+  <link rel="stylesheet" href="static/css/app.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="panel metrics-panel">
+      <div class="panel-head">
+        <h2>Gas Town Control Surface</h2>
+        <div class="toolbar control-surface-toolbar">
+          <div class="live-pill" id="live-pill">
+            <span class="pulse"></span>
+            <span id="live-label">Booting</span>
+          </div>
+          <label class="filter-group" for="scope-select">
+            <span>Rig</span>
+            <select id="scope-select">
+              <option value="all">All</option>
+            </select>
+          </label>
+          <button id="refresh-button" type="button">Refresh now</button>
+        </div>
+      </div>
+      <div id="metrics"></div>
+      <div class="control-surface-meta">
+        <div class="surface-card">
+          <span class="surface-card-label">Town Root</span>
+          <div class="surface-card-value mono" id="gt-root">Loading...</div>
+        </div>
+        <div class="surface-card">
+          <span class="surface-card-label">Snapshot</span>
+          <div class="surface-card-value" id="snapshot-stamp">Waiting for data...</div>
+        </div>
+        <div class="surface-card">
+          <span class="surface-card-label">Services</span>
+          <div class="surface-card-value" id="service-stamp">Waiting for data...</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Primary Terminal</h2>
+        <div class="subtle" id="primary-terminal-summary"></div>
+      </div>
+      <div class="terminal-main" id="primary-terminal"></div>
+    </section>
+
+    <section class="main-grid">
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Task Spine</h2>
+            <div class="subtle">Tasks and commit memory nodes, with dependency and lineage edges.</div>
+          </div>
+          <div class="toolbar">
+            <label class="toggle">
+              <input id="hide-completed-convoys" type="checkbox" checked>
+              <span>Hide completed convoys</span>
+            </label>
+            <label class="toggle">
+              <input id="include-system" type="checkbox">
+              <span>Include system tasks</span>
+            </label>
+            <div class="subtle" id="graph-summary"></div>
+          </div>
+        </div>
+        <div class="graph-wrap">
+          <div class="graph-stage" id="graph-stage">
+            <svg class="graph-svg" id="graph-svg"></svg>
+            <div class="graph-nodes" id="graph-nodes"></div>
+          </div>
+        </div>
+        <div class="legend">
+          <span class="chip running">running</span>
+          <span class="chip stuck">stuck</span>
+          <span class="chip ready">ready</span>
+          <span class="chip done">done</span>
+          <span class="chip ice">deferred</span>
+          <span class="chip memory">git memory</span>
+        </div>
+      </section>
+
+      <aside class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Focus</h2>
+            <div class="subtle">Selected node details and intervention hooks.</div>
+          </div>
+        </div>
+        <div class="focus-stack" id="focus-panel"></div>
+      </aside>
+    </section>
+
+    <section class="panel section-gap">
+      <div class="panel-head">
+        <div>
+          <h2>Agents</h2>
+          <div class="subtle">Core rig and town agents, excluding polecats.</div>
+        </div>
+        <div class="subtle" id="agent-summary"></div>
+      </div>
+      <div class="roster-grid" id="agent-roster"></div>
+    </section>
+
+    <section class="lower-grid">
+      <section class="panel swarm-feed-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Swarm Feed</h2>
+            <div class="subtle">Grouped by currently hooked task, with pane logs when available.</div>
+          </div>
+          <div class="subtle" id="feed-summary"></div>
+        </div>
+        <div class="feed-list" id="feed-list"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Git Memory</h2>
+            <div class="subtle">Recent commits, branch/worktree state, and diff-on-demand.</div>
+          </div>
+          <div class="subtle" id="git-summary"></div>
+        </div>
+        <div class="git-grid" id="git-panel"></div>
+      </section>
+    </section>
+
+    <section class="overview-grid">
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Crew Workspaces</h2>
+            <div class="subtle">Crew repos, branches, and local state.</div>
+          </div>
+          <div class="subtle" id="crew-summary"></div>
+        </div>
+        <div class="stack" id="crew-panel"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Bead Stores</h2>
+            <div class="subtle">Authoritative per-store counts and availability.</div>
+          </div>
+          <div class="subtle" id="stores-summary"></div>
+        </div>
+        <div class="stack" id="stores-panel"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Statuses</h2>
+            <div class="subtle">Stored bead statuses and their meanings.</div>
+          </div>
+        </div>
+        <div class="stack" id="status-panel"></div>
+      </section>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Town Raw</h2>
+          <div class="subtle">Raw GT surfaces preserved for inspection.</div>
+        </div>
+      </div>
+      <div class="raw-grid">
+        <div class="card">
+          <h3>GT Status</h3>
+          <pre id="raw-status"></pre>
+        </div>
+        <div class="card">
+          <h3>GT Vitals</h3>
+          <pre id="raw-vitals"></pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="actions-panel">
+      <div class="panel-head">
+        <h2>Recent Actions</h2>
+        <div class="subtle">Local GTUI requests only.</div>
+      </div>
+      <div class="action-list" id="actions-list"></div>
+    </section>
+
+    <section class="panel" id="errors-panel" hidden>
+      <div class="panel-head">
+        <h2>Command Errors</h2>
+        <div class="subtle">Failed polls stay visible here until the next clean update.</div>
+      </div>
+      <div class="error-list" id="errors-list"></div>
+    </section>
+
+    <div class="footer">
+      <div id="footer-left">Polling every second.</div>
+      <div id="footer-right"></div>
+    </div>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <script type="module" src="static/js/app.js"></script>
+</body>
 </html>
