@@ -964,12 +964,19 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
         vitals_result.error.clone()
     };
 
-    let crews: Vec<Value> = crew_list_result
+    let crews_list: Vec<Value> = crew_list_result
         .data
         .as_ref()
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let crews_running: Vec<Value> = crew_status_result
+        .data
+        .as_ref()
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let crews = merge_crews(crews_list, crews_running);
 
     let feed_events: Vec<Value> = if feed_result.ok {
         let text = feed_result
@@ -1238,6 +1245,146 @@ fn parse_tmux_target(gt_root: &Path, pane_path: &str) -> Option<TmuxTarget> {
     None
 }
 
+fn normalize_change_path(text: &str) -> String {
+    let mut s = text.trim();
+    while let Some(rest) = s.strip_prefix("./") {
+        s = rest;
+    }
+    s.to_string()
+}
+
+fn is_benign_crew_change(path: &str) -> bool {
+    let text = normalize_change_path(path);
+    if text.is_empty() {
+        return false;
+    }
+    if matches!(text.as_str(), "gitignore" | ".gitignore" | ".beads") {
+        return true;
+    }
+    text.starts_with(".beads/")
+}
+
+fn crew_path_list(crew: &Value, key: &str) -> Vec<String> {
+    crew.get(key)
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Port of `enrich_crew_workspace` from `webui/server.py`. Normalises
+/// `git_modified` / `git_untracked`, partitions them into benign/risky paths
+/// (benign = `.beads/*` or `.gitignore`), and attaches derived status fields
+/// the UI consumes (`git_state`, `git_status_label`, `git_status_tone`,
+/// `git_has_risky_changes`, `git_has_local_state_only`).
+fn enrich_crew_workspace(crew: &mut Value) {
+    let Some(_) = crew.as_object() else {
+        return;
+    };
+
+    let modified = crew_path_list(crew, "git_modified");
+    let untracked = crew_path_list(crew, "git_untracked");
+    let (benign_modified, risky_modified): (Vec<String>, Vec<String>) = modified
+        .iter()
+        .cloned()
+        .partition(|p| is_benign_crew_change(p));
+    let (benign_untracked, risky_untracked): (Vec<String>, Vec<String>) = untracked
+        .iter()
+        .cloned()
+        .partition(|p| is_benign_crew_change(p));
+
+    let (git_state, git_status_label, git_status_tone) =
+        if modified.is_empty() && untracked.is_empty() {
+            ("clean", "git clean", "done")
+        } else if !risky_modified.is_empty() || !risky_untracked.is_empty() {
+            ("warning", "repo changes", "stuck")
+        } else {
+            ("local_state", "local state only", "memory")
+        };
+
+    let has_risky = !risky_modified.is_empty() || !risky_untracked.is_empty();
+    let has_local_only = git_state == "local_state";
+
+    let map = crew.as_object_mut().expect("object guarded above");
+    map.insert("git_modified".into(), json!(modified));
+    map.insert("git_untracked".into(), json!(untracked));
+    map.insert("git_benign_modified".into(), json!(benign_modified));
+    map.insert("git_benign_untracked".into(), json!(benign_untracked));
+    map.insert("git_risky_modified".into(), json!(risky_modified));
+    map.insert("git_risky_untracked".into(), json!(risky_untracked));
+    map.insert("git_state".into(), json!(git_state));
+    map.insert("git_status_label".into(), json!(git_status_label));
+    map.insert("git_status_tone".into(), json!(git_status_tone));
+    map.insert("git_has_risky_changes".into(), json!(has_risky));
+    map.insert("git_has_local_state_only".into(), json!(has_local_only));
+}
+
+/// Port of `merge_crews` from `webui/server.py`. Combines the `gt crew list
+/// --all --json` catalog with the `gt crew status --json` running-state feed,
+/// keying by `(rig, name)` so the running row's branch/worktree/mail metadata
+/// overlays the catalog entry. Each merged row is passed through
+/// `enrich_crew_workspace` and the final list is sorted by `(rig, name)` for
+/// stable UI ordering.
+fn merge_crews(all_crews: Vec<Value>, running_crews: Vec<Value>) -> Vec<Value> {
+    use std::collections::BTreeMap;
+
+    fn key_of(v: &Value) -> (String, String) {
+        let rig = v
+            .get("rig")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let name = v
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        (rig, name)
+    }
+
+    let mut merged: BTreeMap<(String, String), Value> = BTreeMap::new();
+
+    for item in all_crews {
+        let key = key_of(&item);
+        merged.insert(key, item);
+    }
+
+    for item in running_crews {
+        let key = key_of(&item);
+        let entry = merged.entry(key.clone()).or_insert_with(|| {
+            json!({
+                "rig": key.0,
+                "name": key.1,
+            })
+        });
+        if let (Some(base), Some(updates)) = (entry.as_object_mut(), item.as_object()) {
+            for (k, v) in updates {
+                base.insert(k.clone(), v.clone());
+            }
+        }
+    }
+
+    let mut crews: Vec<Value> = merged.into_values().collect();
+    for crew in crews.iter_mut() {
+        enrich_crew_workspace(crew);
+    }
+    // BTreeMap already iterated in (rig, name) order, but re-sorting keeps the
+    // contract explicit for anyone who rearranges the map type later.
+    crews.sort_by(|a, b| {
+        let a_rig = a.get("rig").and_then(Value::as_str).unwrap_or("");
+        let a_name = a.get("name").and_then(Value::as_str).unwrap_or("");
+        let b_rig = b.get("rig").and_then(Value::as_str).unwrap_or("");
+        let b_name = b.get("name").and_then(Value::as_str).unwrap_or("");
+        (a_rig, a_name).cmp(&(b_rig, b_name))
+    });
+    crews
+}
+
 /// Alerts ported from the Python `build_snapshot` logic that are cheap without
 /// needing the downstream collectors.
 fn derive_alerts(status: &StatusSummary, crews: &[Value]) -> Vec<String> {
@@ -1472,6 +1619,143 @@ mod tests {
         };
         let alerts = derive_alerts(&status, &[]);
         assert!(alerts.iter().any(|a| a.contains("daemon is stopped")));
+    }
+
+    #[test]
+    fn benign_crew_change_matches_beads_and_gitignore() {
+        assert!(is_benign_crew_change(".beads"));
+        assert!(is_benign_crew_change(".beads/cache.db"));
+        assert!(is_benign_crew_change("./.beads/"));
+        assert!(is_benign_crew_change(".gitignore"));
+        assert!(is_benign_crew_change("gitignore"));
+        assert!(!is_benign_crew_change(""));
+        assert!(!is_benign_crew_change("src/main.rs"));
+        assert!(!is_benign_crew_change(".beadsX"));
+    }
+
+    #[test]
+    fn enrich_crew_workspace_marks_clean_workspace() {
+        let mut crew = json!({"rig": "gtui", "name": "merv"});
+        enrich_crew_workspace(&mut crew);
+        assert_eq!(crew["git_state"], "clean");
+        assert_eq!(crew["git_status_label"], "git clean");
+        assert_eq!(crew["git_status_tone"], "done");
+        assert_eq!(crew["git_has_risky_changes"], false);
+        assert_eq!(crew["git_has_local_state_only"], false);
+        assert_eq!(crew["git_modified"].as_array().unwrap().len(), 0);
+        assert_eq!(crew["git_benign_modified"].as_array().unwrap().len(), 0);
+        assert_eq!(crew["git_risky_modified"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn enrich_crew_workspace_partitions_benign_and_risky_changes() {
+        let mut crew = json!({
+            "rig": "gastown",
+            "name": "merv",
+            "git_modified": ["plugins/run.sh", ".gitignore"],
+            "git_untracked": [".beads/feed.db", "README.md"],
+        });
+        enrich_crew_workspace(&mut crew);
+        assert_eq!(crew["git_state"], "warning");
+        assert_eq!(crew["git_status_label"], "repo changes");
+        assert_eq!(crew["git_status_tone"], "stuck");
+        assert_eq!(crew["git_has_risky_changes"], true);
+        assert_eq!(crew["git_has_local_state_only"], false);
+        assert_eq!(
+            crew["git_benign_modified"],
+            json!([".gitignore"]),
+            "benign_modified should catch .gitignore"
+        );
+        assert_eq!(crew["git_risky_modified"], json!(["plugins/run.sh"]));
+        assert_eq!(crew["git_benign_untracked"], json!([".beads/feed.db"]));
+        assert_eq!(crew["git_risky_untracked"], json!(["README.md"]));
+    }
+
+    #[test]
+    fn enrich_crew_workspace_reports_local_state_only_for_benign_changes() {
+        let mut crew = json!({
+            "rig": "gtui",
+            "name": "merv",
+            "git_modified": [".gitignore"],
+            "git_untracked": [".beads/"],
+        });
+        enrich_crew_workspace(&mut crew);
+        assert_eq!(crew["git_state"], "local_state");
+        assert_eq!(crew["git_status_label"], "local state only");
+        assert_eq!(crew["git_status_tone"], "memory");
+        assert_eq!(crew["git_has_risky_changes"], false);
+        assert_eq!(crew["git_has_local_state_only"], true);
+    }
+
+    #[test]
+    fn enrich_crew_workspace_drops_empty_path_entries() {
+        let mut crew = json!({
+            "rig": "gtui",
+            "name": "merv",
+            "git_modified": ["", "src/lib.rs"],
+            "git_untracked": [""],
+        });
+        enrich_crew_workspace(&mut crew);
+        assert_eq!(crew["git_modified"], json!(["src/lib.rs"]));
+        assert_eq!(crew["git_untracked"], json!(Vec::<String>::new()));
+    }
+
+    #[test]
+    fn merge_crews_overlays_running_state_on_catalog() {
+        let catalog = vec![json!({
+            "rig": "gtui",
+            "name": "merv",
+            "path": "/gt/gtui/crew/merv",
+        })];
+        let running = vec![json!({
+            "rig": "gtui",
+            "name": "merv",
+            "branch": "main",
+            "has_session": true,
+            "git_modified": ["src/main.rs"],
+        })];
+        let crews = merge_crews(catalog, running);
+        assert_eq!(crews.len(), 1);
+        assert_eq!(crews[0]["branch"], "main");
+        assert_eq!(crews[0]["has_session"], true);
+        assert_eq!(crews[0]["path"], "/gt/gtui/crew/merv");
+        assert_eq!(crews[0]["git_has_risky_changes"], true);
+        assert_eq!(crews[0]["git_risky_modified"], json!(["src/main.rs"]));
+    }
+
+    #[test]
+    fn merge_crews_keeps_catalog_only_rows_and_sorts_by_rig_then_name() {
+        let catalog = vec![
+            json!({"rig": "zeta", "name": "b"}),
+            json!({"rig": "alpha", "name": "b"}),
+            json!({"rig": "alpha", "name": "a"}),
+        ];
+        let running = vec![];
+        let crews = merge_crews(catalog, running);
+        assert_eq!(crews.len(), 3);
+        assert_eq!(crews[0]["rig"], "alpha");
+        assert_eq!(crews[0]["name"], "a");
+        assert_eq!(crews[1]["rig"], "alpha");
+        assert_eq!(crews[1]["name"], "b");
+        assert_eq!(crews[2]["rig"], "zeta");
+        // Enrichment always runs, even on sparse catalog rows.
+        assert_eq!(crews[0]["git_state"], "clean");
+    }
+
+    #[test]
+    fn merge_crews_creates_rows_from_running_only() {
+        let catalog = vec![];
+        let running = vec![json!({
+            "rig": "gtui",
+            "name": "ephemeral",
+            "branch": "feature/x",
+        })];
+        let crews = merge_crews(catalog, running);
+        assert_eq!(crews.len(), 1);
+        assert_eq!(crews[0]["rig"], "gtui");
+        assert_eq!(crews[0]["name"], "ephemeral");
+        assert_eq!(crews[0]["branch"], "feature/x");
+        assert_eq!(crews[0]["git_has_risky_changes"], false);
     }
 
     #[test]
