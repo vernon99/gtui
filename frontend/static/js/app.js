@@ -1,4 +1,5 @@
 import { esc } from "./renderers/html.js";
+import { hiddenCompletedTaskIdsFromSnapshot } from "./convoys.mjs";
 import {
   getTranscriptView,
   hasTranscriptItems,
@@ -222,24 +223,7 @@ import {
     }
 
     function hiddenCompletedTaskIds() {
-      if (!app.hideCompletedConvoys) return new Set();
-      const taskIndex = app.snapshot?.convoys?.task_index || {};
-      const hidden = new Set();
-      for (const [taskId, entry] of Object.entries(taskIndex)) {
-        if (!entry || typeof entry !== "object") continue;
-        if (entry.total > 0 && entry.open === 0) {
-          hidden.add(taskId);
-        }
-      }
-      for (const node of (app.snapshot?.graph?.nodes || [])) {
-        if (!node || node.kind !== "task") continue;
-        if (node.status !== "closed") continue;
-        const entry = taskIndex[node.id];
-        if (!entry || Number(entry.open || 0) === 0) {
-          hidden.add(node.id);
-        }
-      }
-      return hidden;
+      return hiddenCompletedTaskIdsFromSnapshot(app.snapshot, app.hideCompletedConvoys);
     }
 
     function filteredTaskNodes() {
