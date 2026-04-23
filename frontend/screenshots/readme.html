@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GTUI README Screenshots</title>
+  <link rel="stylesheet" href="../static/css/app.css">
+  <style>
+    body {
+      width: max-content;
+      margin: 0;
+      padding: 0;
+      display: grid;
+      gap: 32px;
+      overflow: auto;
+    }
+
+    .shot {
+      width: 1400px;
+      height: 860px;
+      overflow: hidden;
+      padding: 18px;
+      background:
+        radial-gradient(circle at top left, rgba(96, 211, 197, 0.14), transparent 28%),
+        radial-gradient(circle at 85% 5%, rgba(255, 138, 61, 0.16), transparent 24%),
+        linear-gradient(180deg, #121110 0%, #090d0d 52%, #050707 100%);
+    }
+
+    .shot::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+      background-size: 32px 32px;
+      pointer-events: none;
+    }
+
+    .shot-shell {
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      height: 100%;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 16px;
+    }
+
+    .shot .metrics-panel {
+      margin-bottom: 0;
+    }
+
+    .shot .main-grid,
+    .shot .terminal-main {
+      margin-bottom: 0;
+      min-height: 0;
+    }
+
+    .shot .graph-wrap {
+      min-height: 478px;
+    }
+
+    .shot .graph-stage {
+      width: 860px;
+      height: 478px;
+    }
+
+    .shot .graph-svg {
+      width: 860px;
+      height: 478px;
+    }
+
+    .shot .node {
+      pointer-events: none;
+    }
+
+    .shot .node-title {
+      font-size: 0.92rem;
+    }
+
+    .shot .focus-stack textarea {
+      min-height: 66px;
+    }
+
+    #shot-task-spine .focus-stack {
+      gap: 10px;
+    }
+
+    #shot-task-spine .focus-stack .card {
+      padding: 12px;
+    }
+
+    #shot-task-spine .event-item {
+      padding: 8px 10px;
+    }
+
+    .shot .terminal-main {
+      grid-template-columns: minmax(0, 1.35fr) minmax(330px, 0.8fr);
+    }
+
+    .shot .primary-log-block {
+      min-height: 420px;
+      max-height: 420px;
+    }
+
+    .shot .codex-transcript {
+      overflow: hidden;
+    }
+
+    .shot .card h3 {
+      white-space: nowrap;
+    }
+
+    .shot .toolbar button {
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <section class="shot" id="shot-task-spine" data-shot="task-spine" aria-label="GTUI task spine representative screenshot">
+    <div class="shot-shell">
+      <section class="panel metrics-panel">
+        <div class="panel-head">
+          <h2>Gas Town Control Surface</h2>
+          <div class="toolbar control-surface-toolbar">
+            <div class="live-pill">
+              <span class="pulse"></span>
+              <span>Live</span>
+            </div>
+            <label class="filter-group">
+              <span>Rig</span>
+              <select>
+                <option>HQ</option>
+              </select>
+            </label>
+            <button type="button">Refresh now</button>
+          </div>
+        </div>
+        <div class="metrics-table-wrap">
+          <table class="metrics-table">
+            <tbody>
+              <tr>
+                <td><div class="metrics-table-label">Hooked</div><div class="metrics-table-value accent-running">2</div><div class="metrics-table-sub">attached to live agent hooks</div></td>
+                <td><div class="metrics-table-label">In Progress</div><div class="metrics-table-value accent-running">3</div><div class="metrics-table-sub">explicitly claimed tasks</div></td>
+                <td><div class="metrics-table-label">Blocked</div><div class="metrics-table-value accent-stuck">1</div><div class="metrics-table-sub">blocked by dependencies</div></td>
+                <td><div class="metrics-table-label">Open</div><div class="metrics-table-value accent-ready">8</div><div class="metrics-table-sub">available/open tasks</div></td>
+                <td><div class="metrics-table-label">Closed</div><div class="metrics-table-value accent-done">21</div><div class="metrics-table-sub">completed tasks</div></td>
+                <td><div class="metrics-table-label">Deferred</div><div class="metrics-table-value accent-ice">2</div><div class="metrics-table-sub">deliberately on ice</div></td>
+                <td><div class="metrics-table-label">Pinned</div><div class="metrics-table-value accent-ice">4</div><div class="metrics-table-sub">persistent reference tasks</div></td>
+                <td><div class="metrics-table-label">Agents</div><div class="metrics-table-value accent-ready">5</div><div class="metrics-table-sub">core live sessions visible</div></td>
+                <td><div class="metrics-table-label">Polecats</div><div class="metrics-table-value accent-memory">3</div><div class="metrics-table-sub">worker cats visible</div></td>
+                <td><div class="metrics-table-label">Errors</div><div class="metrics-table-value accent-stuck">0</div><div class="metrics-table-sub">clean polling cycle</div></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="control-surface-meta">
+          <div class="surface-card">
+            <span class="surface-card-label">Town Root</span>
+            <div class="surface-card-value mono">/Users/mervinkel/gt</div>
+          </div>
+          <div class="surface-card">
+            <span class="surface-card-label">Snapshot</span>
+            <div class="surface-card-value">Apr 23, 11:42:08 AM</div>
+          </div>
+          <div class="surface-card">
+            <span class="surface-card-label">Services</span>
+            <div class="surface-card-value">daemon running · tmux 7 sessions · dolt ready</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="main-grid">
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Task Spine</h2>
+              <div class="subtle">Tasks and commit memory nodes, with dependency and lineage edges.</div>
+            </div>
+            <div class="toolbar">
+              <label class="toggle"><input type="checkbox" checked> <span>Hide completed convoys</span></label>
+              <div class="subtle">6 nodes · 5 edges</div>
+            </div>
+          </div>
+          <div class="graph-wrap">
+            <div class="graph-stage">
+              <svg class="graph-svg" viewBox="0 0 860 478" aria-hidden="true">
+                <path class="graph-edge dependency active" d="M 278 112 C 292 112 296 112 310 112"></path>
+                <path class="graph-edge parent" d="M 278 112 C 300 166 302 246 310 274"></path>
+                <path class="graph-edge dependency active" d="M 554 112 C 562 112 564 106 572 106"></path>
+                <path class="graph-edge commit active" d="M 554 142 C 566 180 568 218 572 238"></path>
+                <path class="graph-edge commit" d="M 554 302 C 566 326 568 346 572 354"></path>
+              </svg>
+              <div class="graph-nodes">
+                <div class="node task ready" style="left: 34px; top: 54px;">
+                  <div class="node-top"><div class="node-id">hq-ui-shell</div><span class="status-dot ready"></span></div>
+                  <div class="node-title">Move desktop UI onto the static Tauri frontend</div>
+                  <div class="node-meta"><span class="chip ready">open</span><span class="chip">frontend</span></div>
+                </div>
+                <div class="node task running selected" style="left: 310px; top: 44px;">
+                  <div class="node-top"><div class="node-id">hq-renderers</div><span class="status-dot running"></span></div>
+                  <div class="node-title">Normalize Claude and Codex transcript rendering</div>
+                  <div class="node-meta"><span class="chip running">hooked</span><span class="chip">2 agents</span></div>
+                </div>
+                <div class="node task ready" style="left: 572px; top: 44px;">
+                  <div class="node-top"><div class="node-id">hq-readme</div><span class="status-dot ready"></span></div>
+                  <div class="node-title">Refresh README visuals and development notes</div>
+                  <div class="node-meta"><span class="chip ready">ready</span><span class="chip memory">docs</span></div>
+                </div>
+                <div class="node task done" style="left: 310px; top: 252px;">
+                  <div class="node-top"><div class="node-id">hq-static</div><span class="status-dot done"></span></div>
+                  <div class="node-title">Serve CSS and modules directly from frontend/</div>
+                  <div class="node-meta"><span class="chip done">closed</span><span class="chip">tauri</span></div>
+                </div>
+                <div class="node commit memory" style="left: 572px; top: 214px;">
+                  <div class="node-top"><div class="node-id">9f6c689</div><span class="status-dot memory"></span></div>
+                  <div class="node-title">9f6c689 · main</div>
+                  <div class="node-meta"><span class="chip memory">commit</span></div>
+                </div>
+                <div class="node task ice" style="left: 572px; top: 322px;">
+                  <div class="node-top"><div class="node-id">hq-smoke</div><span class="status-dot ice"></span></div>
+                  <div class="node-title">Verify terminal API and frontend states</div>
+                  <div class="node-meta"><span class="chip ice">deferred</span><span class="chip memory">checks</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="legend">
+            <span class="chip running">running</span>
+            <span class="chip stuck">stuck</span>
+            <span class="chip ready">ready</span>
+            <span class="chip done">done</span>
+            <span class="chip ice">deferred</span>
+            <span class="chip memory">git memory</span>
+          </div>
+        </section>
+
+        <aside class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Focus</h2>
+              <div class="subtle">Selected node details and intervention hooks.</div>
+            </div>
+          </div>
+          <div class="focus-stack">
+            <div class="card">
+              <h3>Task Focus</h3>
+              <div class="node-id">hq-renderers</div>
+              <div class="focus-title">Normalize Claude and Codex transcript rendering</div>
+              <div class="focus-description">The active task keeps provider-specific transcript detail while giving the primary terminal a single readable surface.</div>
+              <div class="node-meta"><span class="chip running">hooked</span><span class="chip">P2</span><span class="chip memory">2 commits</span></div>
+            </div>
+            <div class="card">
+              <h3>Intervention</h3>
+              <textarea>Check the primary terminal, then nudge the active renderer task if the transcript stalls.</textarea>
+              <div class="tiny-actions" style="margin-top: 10px;">
+                <button type="button">Nudge</button>
+                <button type="button">Pause</button>
+                <button type="button">Write</button>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </section>
+    </div>
+  </section>
+
+  <section class="shot" id="shot-mayor-chat" data-shot="mayor-chat" aria-label="GTUI mayor chat representative screenshot">
+    <div class="shot-shell">
+      <section class="panel metrics-panel">
+        <div class="panel-head">
+          <h2>Primary Terminal</h2>
+          <div class="subtle">mayor · controller · Claude transcript · HQ</div>
+        </div>
+      </section>
+
+      <section class="terminal-main">
+        <div class="terminal-shell">
+          <div class="card">
+            <div class="agent-top">
+              <div>
+                <div class="feed-title">Mayor Claude</div>
+                <div class="subtle">mayor · mayor-sample-session.jsonl</div>
+              </div>
+              <div class="tiny-actions">
+                <button type="button">Pause</button>
+                <button type="button">Write</button>
+              </div>
+            </div>
+            <div class="node-meta">
+              <span class="chip running">session live</span>
+              <span class="chip running">hooked hq-renderers</span>
+              <span class="chip">claude</span>
+              <span class="chip memory">claude 36 items</span>
+              <span class="chip">just now</span>
+            </div>
+            <div id="primary-terminal-log" class="primary-log-block codex-transcript">
+              <div class="codex-item user">
+                <div class="codex-head"><div class="codex-head-left"><span class="codex-role">USER</span></div><span class="codex-time">11:39</span></div>
+                <div class="codex-bubble"><div class="codex-text">Check hook and mail, then act on hooked work if present.</div></div>
+              </div>
+              <div class="codex-item tool_call">
+                <div class="codex-head"><div class="codex-head-left"><span class="chip memory">Bash</span><span class="codex-summary">Check hooked work: gt hook</span></div><span class="codex-time">11:39</span></div>
+              </div>
+              <div class="codex-item tool_output">
+                <div class="codex-head"><div class="codex-head-left"><span class="chip memory">Bash</span><span class="codex-summary">Hook status</span></div><span class="codex-time">11:39</span></div>
+                <div class="codex-output">Hook Status: mayor
+Role: mayor
+Attached task: hq-renderers
+Worktree: /Users/mervinkel/gt</div>
+              </div>
+              <div class="codex-item assistant">
+                <div class="codex-head"><div class="codex-head-left"><span class="codex-role">CLAUDE</span></div><span class="codex-time">11:40</span></div>
+                <div class="codex-bubble"><div class="codex-markdown"><p>No blocker in the controller terminal. I have two fresh escalations in mail and the renderer task is hooked.</p></div></div>
+              </div>
+              <div class="codex-item tool_call">
+                <div class="codex-head"><div class="codex-head-left"><span class="chip memory">Bash</span><span class="codex-summary">Read latest escalation: gt mail read hq-52uy</span></div><span class="codex-time">11:41</span></div>
+              </div>
+              <div class="codex-item tool_output">
+                <div class="codex-head"><div class="codex-head-left"><span class="chip memory">Bash</span><span class="codex-summary">Dolt health</span></div><span class="codex-time">11:42</span></div>
+                <div class="codex-output">Dolt server is running
+Query latency: 0s
+Connections: 4 / 1000</div>
+              </div>
+            </div>
+            <div class="stack" style="margin-top: 12px;">
+              <label class="subtle" for="fixture-primary-inject-message">Write to mayor</label>
+              <textarea id="fixture-primary-inject-message">Ask for a focused update on the current hook and next action.</textarea>
+              <div class="tiny-actions"><button type="button">Send to terminal</button></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="terminal-meta">
+          <div class="card">
+            <h3>Polecats</h3>
+            <div class="subtle">3 polecats · 1 hooked · 2 idle</div>
+            <div class="roster-grid terminal-roster-grid" style="margin-top: 12px;">
+              <div class="roster-card agent-row">
+                <div class="agent-top"><div><div class="feed-title">jasper</div><div class="subtle">hooked hq-renderers</div></div><span class="chip running">live</span></div>
+              </div>
+              <div class="roster-card agent-row">
+                <div class="agent-top"><div><div class="feed-title">opal</div><div class="subtle">idle</div></div><span class="chip ready">ready</span></div>
+              </div>
+              <div class="roster-card agent-row">
+                <div class="agent-top"><div><div class="feed-title">quartz</div><div class="subtle">idle</div></div><span class="chip ready">ready</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="card">
+            <h3>Recent Events</h3>
+            <div class="event-list">
+              <div class="event-item"><div class="event-time">11:39</div><div>session_start</div></div>
+              <div class="event-item"><div class="event-time">11:40</div><div>mail read hq-52uy</div></div>
+              <div class="event-item"><div class="event-time">11:42</div><div>hook heartbeat received</div></div>
+            </div>
+          </div>
+          <div class="card">
+            <h3>Attention</h3>
+            <div class="alert-list">
+              <div class="alert-item">Renderer task is active and accepting terminal writes.</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </section>
+</body>
+</html>

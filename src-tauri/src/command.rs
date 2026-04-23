@@ -1,10 +1,9 @@
 //! Subprocess execution for `gt` / `bd` / `git` CLI calls.
 //!
-//! Port of `run_command` / `CommandResult` from `webui/server.py` (≈ lines
-//! 390–493). Semantics preserved: success => `ok = true` with parsed or raw
-//! stdout in `data`; timeout/non-zero exit/JSON failure => `ok = false` with a
-//! populated `error` field. The Python `to_error()` helper is kept as a method
-//! so callers that splat errors into the snapshot surface can use it verbatim.
+//! The command layer keeps subprocess failures structured instead of panicking:
+//! success yields `ok = true` with parsed or raw stdout in `data`, while
+//! timeout, non-zero exit, and JSON parse failures yield `ok = false` with a
+//! populated `error` field.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -20,9 +19,8 @@ use crate::config::DEFAULT_COMMAND_TIMEOUT;
 
 /// Structured result of one subprocess invocation.
 ///
-/// Mirrors the Python `CommandResult` dataclass. `data` is `null` for failed
-/// runs, a JSON value when `parse_json = true` succeeded, or a JSON string
-/// (raw stdout) otherwise.
+/// `data` is `null` for failed runs, a JSON value when `parse_json = true`
+/// succeeded, or a JSON string with raw stdout otherwise.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CommandResult {
     pub ok: bool,
@@ -43,7 +41,7 @@ pub struct CommandResult {
 
 impl CommandResult {
     /// Render a serializable error payload suitable for the snapshot's
-    /// `errors` list. Matches `CommandResult.to_error()` in the Python port.
+    /// `errors` list.
     pub fn to_error(&self) -> Value {
         let message = if !self.error.is_empty() {
             self.error.clone()
@@ -64,8 +62,8 @@ impl CommandResult {
     }
 }
 
-/// Options accepted by [`run_command`]. Defaults mirror the Python signature:
-/// 3s timeout, no JSON parsing, no stdin.
+/// Options accepted by [`run_command`]. Defaults are 3s timeout, no JSON
+/// parsing, and no stdin.
 #[derive(Debug, Clone, Default)]
 pub struct RunOptions {
     pub timeout: Option<Duration>,
@@ -270,8 +268,7 @@ where
     }
 }
 
-/// Render a `shlex`-style quoted representation of an argv, matching the
-/// Python `display_command` helper used throughout the action records.
+/// Render a `shlex`-style quoted representation of an argv for action records.
 pub fn display_command<S: AsRef<str>>(args: &[S]) -> String {
     args.iter()
         .map(|a| shell_quote(a.as_ref()))

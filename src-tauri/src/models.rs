@@ -1,12 +1,9 @@
 //! Data model for the workspace snapshot exchanged between the Rust backend
 //! and the WebView frontend.
 //!
-//! Field names and JSON shape match the existing Python implementation
-//! (`webui/server.py`) so the JS frontend can consume either backend without
-//! code changes while the migration is in flight. Where the Python code
-//! uses loose `dict[str, Any]` for fields that haven't been schematised yet
-//! (graph, git, convoys, etc.) we preserve the same flexibility here with
-//! `serde_json::Value`.
+//! Typed structs cover the stable frontend-facing fields. Sections that remain
+//! intentionally loose, such as graph, git, convoys, stores, and actions, use
+//! `serde_json::Value` so the app can preserve the full runtime payload.
 
 use std::collections::BTreeMap;
 
@@ -45,9 +42,7 @@ pub struct RigInfo {
 
 /// A single task node (issue) as rendered for the graph / activity panes.
 ///
-/// Matches `compact_issue()` in `webui/server.py` plus the `kind`, `scope`,
-/// `agent_targets`, `ui_status`, `is_system` fields that `finalize_graph()`
-/// layers on top.
+/// Compact issue fields plus the graph annotations that the frontend renders.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TaskInfo {
     pub id: String,
@@ -171,8 +166,7 @@ pub struct Activity {
 
 /// Aggregate counters surfaced at the top of the UI.
 ///
-/// Mirrors `summary` in `build_snapshot()`. Grouped JSON sub-objects
-/// (`stored_status_counts`, `derived_status_counts`) keep the Python shape.
+/// Grouped JSON sub-objects keep stored and derived status counts separate.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Metrics {
     #[serde(default)]
@@ -216,8 +210,7 @@ pub struct Timings {
 
 /// Serialized subprocess failure surfaced in `snapshot.errors`. Produced by
 /// `CommandResult::to_error`; kept as `Value` on the snapshot itself because
-/// some entries carry extra adhoc fields and renaming them all would cost us
-/// backend/frontend parity during the port.
+/// some entries carry extra adhoc fields.
 pub type CommandError = Value;
 
 /// Entry in the snapshot's legend describing a single bead status.
@@ -230,10 +223,9 @@ pub struct StatusLegendEntry {
 }
 
 /// Top-level snapshot: everything the UI needs to render one frame of the
-/// dashboard. Fields that are still loosely typed in the Python port
-/// (`graph`, `git`, `convoys`, `crews`, `stores`, `actions`) are kept as
-/// `serde_json::Value` so we can wire Tauri IPC without finalising their
-/// schema this round.
+/// dashboard. Loosely typed sections (`graph`, `git`, `convoys`, `crews`,
+/// `stores`, `actions`) are kept as `serde_json::Value` so their nested shape
+/// can evolve without forcing model churn.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkspaceSnapshot {
     pub generated_at: String,
@@ -273,7 +265,7 @@ pub struct WorkspaceSnapshot {
     pub timings: Timings,
 }
 
-/// The canonical legend. Matches `STATUS_LEGEND` in `webui/server.py`.
+/// The canonical legend. Matches `STATUS_LEGEND` in `the snapshot contract`.
 pub fn default_status_legend() -> Vec<StatusLegendEntry> {
     vec![
         StatusLegendEntry {
@@ -387,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn task_info_preserves_python_field_names() {
+    fn task_info_preserves_frontend_field_names() {
         let task = TaskInfo {
             id: "gui-bn8.3".into(),
             title: "Port data models".into(),
@@ -406,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn status_legend_matches_python_count_and_order() {
+    fn status_legend_matches_contract_count_and_order() {
         let legend = default_status_legend();
         assert_eq!(legend.len(), 7);
         assert_eq!(legend[0].name, "open");

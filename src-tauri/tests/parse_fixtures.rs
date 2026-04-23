@@ -2,7 +2,7 @@
 //!
 //! The fixtures under `tests/fixtures/` are hand-curated samples matching the
 //! shape of real `gt status --fast`, `gt feed --plain`, and `gt crew list
-//! --all --json` responses. If the parsers ever drift from the Python server
+//! --all --json` responses. If the parsers ever drift from local HTTP server
 //! these tests are the first line of defence.
 
 mod common;

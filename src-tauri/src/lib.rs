@@ -6,15 +6,18 @@ pub mod parse;
 pub mod sessions;
 pub mod snapshot;
 
-use crate::config::default_gt_root;
+use crate::config::{default_gt_root, env_flag, install_default_tool_path};
 use crate::snapshot::SnapshotStore;
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    install_default_tool_path();
+    let open_devtools = env_flag("GTUI_OPEN_DEVTOOLS");
     let store = SnapshotStore::new(default_gt_root());
     let poller = store.clone();
     tauri::Builder::default()
-        .setup(move |_app| {
+        .setup(move |app| {
             // `SnapshotStore::spawn` calls `tokio::spawn` internally, which
             // requires a current runtime. Tauri's setup hook runs on the
             // main thread outside any runtime, so schedule the spawn on
@@ -23,6 +26,12 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 poller.spawn();
             });
+            #[cfg(debug_assertions)]
+            if open_devtools {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.open_devtools();
+                }
+            }
             Ok(())
         })
         .manage(store)

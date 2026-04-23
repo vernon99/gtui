@@ -1,6 +1,6 @@
-//! Session scanning caches ported from `SnapshotStore` in `webui/server.py`.
+//! Session scanning and transcript caches for Codex and Claude CLI sessions.
 //!
-//! Covers the four caches referenced by the issue:
+//! Covers four cache layers:
 //!
 //! 1. Codex rollout list cache (3s TTL)
 //! 2. Claude session list cache (3s TTL)
@@ -8,9 +8,8 @@
 //!    unchanged"
 //! 4. Signature-based per-file transcript cache
 //!
-//! The scanning glob + TTL semantics match the Python implementation exactly.
-//! Meta parsing is kept minimal (cwd + session_id) because the downstream
-//! transcript rendering is not in scope for this bead.
+//! Meta parsing is intentionally minimal: session matching only needs cwd and
+//! session id, while transcript parsing happens on demand.
 
 use std::collections::HashMap;
 use std::fs;
@@ -30,8 +29,6 @@ use crate::parse::{
 };
 
 /// Per-file fingerprint used to decide whether a cached parse is still valid.
-/// The Python port uses `(st_mtime_ns, st_size)` — same shape here so any bug
-/// we reproduce (or fix) matches 1:1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FileSignature {
     pub mtime_ns: i128,
@@ -40,7 +37,7 @@ pub struct FileSignature {
 
 impl FileSignature {
     /// Read the signature for `path`. Returns `None` for missing files or
-    /// permission errors — same as the Python `try: stat() except OSError`.
+    /// permission errors.
     pub fn of(path: &Path) -> Option<Self> {
         let meta = fs::metadata(path).ok()?;
         let mtime_ns = meta
@@ -70,7 +67,7 @@ impl CachedFileList {
 }
 
 /// Cached snapshot of session metadata tagged with the signature that
-/// produced it. Matches `{"signature": ..., "meta": ...}` in Python.
+/// produced it.
 #[derive(Debug, Clone)]
 pub struct SignedEntry<T: Clone> {
     pub signature: FileSignature,
@@ -276,8 +273,7 @@ pub fn read_full(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// Parse a chunk of JSONL text, skipping empty lines and bad records. Mirrors
-/// `iter_jsonl_records` in Python.
+/// Parse a chunk of JSONL text, skipping empty lines and bad records.
 pub fn iter_jsonl_records(text: &str) -> Vec<Value> {
     text.lines()
         .filter_map(|line| {
@@ -314,8 +310,7 @@ fn cached_signed<T: Clone>(
 
 /// Read (or reuse from cache) a Codex rollout's header metadata.
 ///
-/// The returned value matches the Python shape:
-/// `{path, cwd, session_id, modified_at, mtime}`.
+/// The returned value is `{path, cwd, session_id, modified_at, mtime}`.
 pub fn get_codex_rollout_meta(cache: &mut CodexCache, path: &Path) -> Value {
     let Some(signature) = FileSignature::of(path) else {
         return Value::Null;
@@ -378,7 +373,7 @@ pub fn get_codex_rollout_meta(cache: &mut CodexCache, path: &Path) -> Value {
 
 /// Read (or reuse) Claude session header metadata.
 ///
-/// Returns the Python shape `{path, cwd, session_id, modified_at, mtime}`.
+/// Returns `{path, cwd, session_id, modified_at, mtime}`.
 pub fn get_claude_session_meta(cache: &mut ClaudeCache, path: &Path) -> Value {
     let Some(signature) = FileSignature::of(path) else {
         return Value::Null;
@@ -715,8 +710,7 @@ pub fn find_codex_rollout(
 }
 
 /// Parse a Codex CLI JSONL rollout into the transcript view consumed by the
-/// frontend. Mirrors `SnapshotStore.parse_codex_transcript` in
-/// `webui/server.py`.
+/// frontend.
 pub fn parse_codex_transcript(cache: &mut CodexCache, path: &Path) -> Value {
     let Some(signature) = FileSignature::of(path) else {
         return Value::Null;
@@ -1138,8 +1132,7 @@ mod tests {
 
     #[test]
     fn cached_file_list_rescans_when_previous_was_empty() {
-        // Matches Python: `cached_files and expires_at > now`. If the last
-        // scan returned no files we always re-scan.
+        // Empty scans are not considered fresh, so we always re-scan after one.
         let mut cache = CachedFileList::default();
         let start = Instant::now();
         let ttl = Duration::from_secs(60);

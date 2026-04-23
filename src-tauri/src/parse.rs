@@ -1,11 +1,11 @@
-//! Minimal parsers ported from `webui/server.py`.
+//! Parsers for GTUI runtime inputs.
 //!
-//! Only the pieces used by `build_snapshot` / `SnapshotStore` in this round:
-//! `gt status` summary, `gt feed` events, and the path helpers used by the
-//! session-match scoring. Everything else (`collect_agents`, `finalize_graph`,
-//! etc.) stays in Python for now and is stubbed from the Rust side.
+//! These helpers cover the text formats shared by the snapshot builder,
+//! terminal/session matching, and tests: `gt status`, `gt feed`, tmux/session
+//! path matching, and timestamp/path normalization.
 
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use chrono::{Local, SecondsFormat};
@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 
 use crate::models::StatusSummary;
 
-/// `datetime.now().astimezone().isoformat(timespec="seconds")` in Python.
+/// Current local timestamp serialized to second precision.
 pub fn now_iso() -> String {
     Local::now().to_rfc3339_opts(SecondsFormat::Secs, false)
 }
@@ -83,8 +83,8 @@ pub fn parse_status_summary(status_text: &str) -> StatusSummary {
     summary
 }
 
-/// Parse `gt feed` plain output into a list of loose event dicts matching the
-/// Python shape: `{time, symbol, actor, message, raw}`.
+/// Parse `gt feed` plain output into loose event objects:
+/// `{time, symbol, actor, message, raw}`.
 pub fn parse_feed(text: &str) -> Vec<Value> {
     let mut events = Vec::new();
     for raw_line in text.lines() {
@@ -113,8 +113,8 @@ pub fn parse_feed(text: &str) -> Vec<Value> {
     events
 }
 
-/// Port of `normalize_lines` from Python: rstrip each line, trim leading and
-/// trailing blank lines, and cap to the last `limit` lines.
+/// Trim terminal lines, drop leading/trailing blank lines, and cap to the last
+/// `limit` lines.
 pub fn normalize_lines(text: &str, limit: usize) -> Vec<String> {
     let mut lines: Vec<String> = text
         .split('\n')
@@ -133,14 +133,15 @@ pub fn normalize_lines(text: &str, limit: usize) -> Vec<String> {
     lines
 }
 
-/// Normalise a filesystem path for comparison. Matches `normalize_path_value`
-/// in Python: prefer `realpath` (symlink resolution) then `normpath`.
+/// Normalise a filesystem path for comparison: prefer realpath-style symlink
+/// resolution, then fall back to POSIX `normpath` semantics.
 pub fn normalize_path_value(path_text: &str) -> String {
     if path_text.is_empty() {
         return String::new();
     }
     let p = Path::new(path_text);
     let canonical = std::fs::canonicalize(p)
+        .or_else(|_| realpath_existing_parent(p))
         .map(|buf| buf.to_string_lossy().into_owned())
         .unwrap_or_else(|_| normpath(path_text));
     if canonical.is_empty() {
@@ -150,9 +151,39 @@ pub fn normalize_path_value(path_text: &str) -> String {
     }
 }
 
-/// Stand-in for Python's `os.path.normpath`. We only need the behaviour for
-/// POSIX-style paths since that's where Gas Town runs. Handles trailing
-/// slashes, `.` and `..` segments.
+fn realpath_existing_parent(path: &Path) -> Result<PathBuf, std::io::Error> {
+    if !path.is_absolute() {
+        return std::fs::canonicalize(path);
+    }
+
+    let mut cursor = path;
+    let mut suffix: Vec<OsString> = Vec::new();
+    loop {
+        match std::fs::canonicalize(cursor) {
+            Ok(mut base) => {
+                for part in suffix.iter().rev() {
+                    base.push(part);
+                }
+                return Ok(base);
+            }
+            Err(err) => {
+                if let Some(name) = cursor.file_name() {
+                    suffix.push(name.to_os_string());
+                }
+                let Some(parent) = cursor.parent() else {
+                    return Err(err);
+                };
+                if parent == cursor {
+                    return Err(err);
+                }
+                cursor = parent;
+            }
+        }
+    }
+}
+
+/// POSIX-style `normpath` helper. Handles trailing slashes, `.` and `..`
+/// segments.
 fn normpath(path_text: &str) -> String {
     let is_abs = path_text.starts_with('/');
     let mut stack: Vec<&str> = Vec::new();
@@ -195,7 +226,7 @@ pub fn encode_claude_project_dir(path_text: &str) -> String {
 }
 
 /// Score how well `session_cwd` matches `target_path`. Negative means no
-/// match; higher is better. Matches `match_path_score` in Python.
+/// match; higher is better.
 pub fn match_path_score(target_path: &str, session_cwd: &str) -> i32 {
     let target = normalize_path_value(target_path);
     let session = normalize_path_value(session_cwd);
@@ -216,8 +247,7 @@ pub fn match_path_score(target_path: &str, session_cwd: &str) -> i32 {
     -1
 }
 
-/// Cheap helper for tests that need a path stringified identically to the
-/// Python port (`str(Path(...))`).
+/// Cheap helper for tests that need a path stringified consistently.
 #[cfg(test)]
 pub(crate) fn path_str(path: &Path) -> String {
     path.to_string_lossy().into_owned()
@@ -252,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_status_summary_matches_python_fields() {
+    fn parse_status_summary_matches_contract_fields() {
         let text = "\
 Town: gastown
 /home/user/gt
@@ -308,6 +338,26 @@ raw passthrough line
         assert_eq!(normpath("a/./b/../c"), "a/c");
         assert_eq!(normpath("/"), "/");
         assert_eq!(normpath(""), ".");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normalize_path_value_resolves_existing_parent_for_missing_leaf() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).expect("create real dir");
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        let missing = link.join("missing/leaf");
+        let expected = real
+            .canonicalize()
+            .expect("canonical real dir")
+            .join("missing/leaf");
+        assert_eq!(
+            normalize_path_value(&missing.to_string_lossy()),
+            expected.to_string_lossy()
+        );
     }
 
     #[test]

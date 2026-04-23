@@ -1,24 +1,21 @@
 //! Regression gate for the `gui-cqe` feature-parity epic.
 //!
-//! The epic shipped a Rust port of every collector the legacy `webui/server.py`
-//! ran. This test file is the executable form of the epic's acceptance
-//! checklist: it pins the six UI-visible sections the bead names — Task Spine,
+//! This file is the executable form of the desktop app's acceptance checklist:
+//! it pins the six UI-visible sections the frontend depends on — Task Spine,
 //! Git Memory, Bead Stores, Crew Workspaces, Convoys-derived filtering, and
 //! actionable Focus controls — to the populated snapshot contract so a future
 //! change that silently drops one of them trips the suite.
 //!
-//! Structural parity against live data is covered by `scripts/parity_smoke.sh`
-//! (webui vs `examples/snapshot_dump`). End-to-end IPC behaviour is covered by
-//! `tests/ipc_roundtrip.rs`. This file sits on top and asserts that the
-//! frontend-facing sections stay populated and shaped the way `src/static/js`
-//! consumes them.
+//! End-to-end IPC behaviour is covered by `tests/ipc_roundtrip.rs`. This file
+//! sits on top and asserts that frontend-facing sections stay populated and
+//! shaped the way `frontend/static/js` consumes them.
 
 mod common;
 
 use common::load_fixture_json;
 use serde_json::Value;
 
-const POPULATED: &str = "webui_snapshot_populated.json";
+const POPULATED: &str = "snapshot_contract_populated.json";
 
 fn as_array<'a>(value: &'a Value, path: &[&str]) -> &'a Vec<Value> {
     let mut cursor = value;
@@ -46,9 +43,9 @@ fn as_object_len(value: &Value, path: &[&str]) -> usize {
 }
 
 /// Task Spine — `graph.nodes` + `activity.groups` drive the spine view. The
-/// frontend (`src/static/js/app.js`) reads both: nodes for the task timeline
+/// frontend (`frontend/static/js/app.js`) reads both: nodes for the task timeline
 /// and groups to cluster agents by task. A non-empty spine is the headline
-/// acceptance signal for the parity work.
+/// acceptance signal for the app contract.
 #[test]
 fn task_spine_has_nodes_edges_and_activity_groups() {
     let snap = load_fixture_json(POPULATED);

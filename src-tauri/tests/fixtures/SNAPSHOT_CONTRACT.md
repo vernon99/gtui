@@ -1,35 +1,33 @@
-# Legacy webui snapshot fixtures
+# Snapshot Contract Fixtures
 
-Captured via `python3 webui/server.py --gt-root <root>` followed by
-`curl http://127.0.0.1:8420/api/snapshot` for use as parity anchors while
-porting `build_snapshot` (webui/server.py:1623) to Rust.
+These fixtures pin the JSON shape consumed by the GTUI frontend. They were
+captured from a populated Gas Town workspace during the desktop migration and
+are kept as stable contract fixtures, not as live data.
 
 Files:
 
-- `webui_snapshot_populated.json` — captured against `$HOME/gt` with the full
-  polecat swarm running. Terminal transcripts inside `actions[].terminal.*_view`
-  were truncated to 2 items per view (with a `_fixture_note` marker) to keep the
-  fixture ~320KB instead of 11MB; nothing else was edited.
-- `webui_snapshot_empty.json` — captured against an empty directory
-  (`mkdir /tmp/empty-gt && python3 webui/server.py --gt-root /tmp/empty-gt`).
-  The `gt` CLI still returns data for globally-registered rigs, so
-  `git`/`agents`/`crews` are non-empty; `graph`, `stores`, and `actions` are the
-  fields that go to zero.
+- `snapshot_contract_populated.json` — populated workspace with graph, agents,
+  git memory, stores, convoys, actions, and transcript views. Long transcript
+  arrays inside action payloads were trimmed to keep the fixture small.
+- `snapshot_contract_empty.json` — empty workspace root. The `gt` CLI can still
+  report globally registered rigs, so `git`/`agents`/`crews` may be non-empty;
+  `graph`, `stores`, and `actions` are the fields expected to go to zero.
 
-## Parity target (per gui-cqe.1)
+## Contract Target
 
-JSON shape + key counts on the fields below. Exact values drift with wall
-clock and live state; tests should assert on structure, not payload equality.
+Tests assert on structure and presence, not exact live values. Timestamps,
+counts, and workspace state can drift across real runs; these fixtures exist to
+catch accidental removal or reshaping of frontend-facing sections.
 
-### Top-level (18 keys, always present)
+### Top-Level Keys
 
-```
+```text
 actions, activity, agents, alerts, convoys, crews, errors,
 generated_at, generation_ms, git, graph, gt_root, status,
 status_legend, stores, summary, timings, vitals_raw
 ```
 
-### Counts observed in fixtures
+### Counts Observed In Fixtures
 
 | Field                          | populated | empty |
 |--------------------------------|-----------|-------|
@@ -37,20 +35,17 @@ status_legend, stores, summary, timings, vitals_raw
 | `graph.edges`                  | 179       | 0     |
 | `activity.groups`              | 4         | 0     |
 | `activity.unassigned_agents`   | 4         | 4     |
-| `git.repos`                    | ≥1        | ≥1    |
-| `git.recent_commits`           | ≥1        | ≥1    |
-| `convoys.convoys`              | ≥1        | 0     |
+| `git.repos`                    | >=1       | >=1   |
+| `git.recent_commits`           | >=1       | >=1   |
+| `convoys.convoys`              | >=1       | 0     |
 | `stores`                       | 4         | 0     |
 | `agents`                       | 11        | 7     |
 | `alerts`                       | 2         | 1     |
-| `summary` (keys)               | 11        | 11    |
-| `status_legend` (entries)      | 7         | 7     |
-| `actions`                      | 12 (cap)  | 0     |
+| `summary` keys                 | 11        | 11    |
+| `status_legend` entries        | 7         | 7     |
+| `actions`                      | 12 cap    | 0     |
 
-### Inner key schemas
-
-Stable keys observed on populated records. Serialize-with-default is fine for
-any missing keys on sparse rows.
+### Inner Key Schemas
 
 - `graph.nodes[i]` — `agent_targets, assignee, blocked_by, blocked_by_count,
   closed_at, created_at, dependency_count, dependent_count, description, id,
@@ -75,16 +70,4 @@ any missing keys on sparse rows.
   done_tasks, ready_tasks, repos, running_tasks, stored_status_counts,
   stuck_tasks, system_running, task_groups`
 - `status` — `overseer, raw, root_path, services, tmux_socket, town`
-- `alerts` — `Vec<String>` (e.g. "Gas Town daemon is stopped.")
-
-### Recapture recipe
-
-```bash
-python3 webui/server.py --gt-root "$HOME/gt" --port 8420 &
-sleep 3  # let the background poller hydrate
-curl -s http://127.0.0.1:8420/api/snapshot > /tmp/snapshot_full.json
-kill %1
-# then trim actions[].terminal.{claude,codex,transcript}_view.items to 2 entries
-```
-
-For the empty fixture, point `--gt-root` at an empty directory instead.
+- `alerts` — `Vec<String>`

@@ -1,12 +1,9 @@
 //! Snapshot assembly + store.
 //!
-//! Port of `build_snapshot()` and `SnapshotStore` from `webui/server.py`. The
-//! five coarse `gt` CLI calls are fanned out in parallel via `tokio::join!`
-//! (Python's `run_command` is blocking and sequential), but the downstream
-//! collectors (`collect_agents`, `collect_bead_data`, `collect_git_memory`,
-//! `collect_convoy_data`, `finalize_graph`, `build_activity_groups`) run
-//! inline. Everything the store *does* own — locks, polling loop, action ring
-//! buffer, caches — is in place.
+//! The store owns the polling loop, immutable snapshot cache, action history,
+//! git diff cache, and transcript/session caches. Snapshot collection fans out
+//! the coarse `gt` CLI calls in parallel, then assembles the downstream agent,
+//! bead, git, convoy, graph, and activity sections inline.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
@@ -27,7 +24,9 @@ use crate::models::{
     default_status_legend, Activity, ActivityGroup, AgentInfo, Metrics, StatusSummary, Timings,
     WorkspaceSnapshot,
 };
-use crate::parse::{normalize_lines, now_iso, parse_feed, parse_status_summary};
+use crate::parse::{
+    normalize_lines, normalize_path_value, now_iso, parse_feed, parse_status_summary,
+};
 use crate::sessions::{
     claude_projects_root, codex_sessions_root, find_claude_session, find_codex_rollout,
     parse_claude_transcript, parse_codex_transcript, ClaudeCache, CodexCache,
@@ -36,7 +35,7 @@ use crate::sessions::{
 /// Maximum number of most-recent actions retained on the snapshot store.
 pub const ACTION_HISTORY_LIMIT: usize = 24;
 
-/// Number of actions surfaced on each snapshot (matches Python `[:12]`).
+/// Number of actions surfaced on each snapshot.
 pub const SNAPSHOT_ACTION_LIMIT: usize = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,8 +62,7 @@ fn terminal_send_mode(command: &str) -> TerminalSendMode {
 }
 
 /// Cached git diff entry. `text` is pre-truncated (≤ 500 lines plus a trailing
-/// marker) just like the Python side so downstream consumers don't re-pay the
-/// cost.
+/// marker) so downstream consumers do not re-pay the cost.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CachedGitDiff {
     pub repo_id: String,
@@ -167,7 +165,7 @@ impl SnapshotStore {
     }
 
     /// Record a new action and prune to the last [`ACTION_HISTORY_LIMIT`]
-    /// entries. Mirrors `SnapshotStore._record_action` in Python: newest first.
+    /// entries. Mirrors `SnapshotStore._record_action` in snapshot contract: newest first.
     pub fn record_action(&self, action: Value) {
         let mut state = self
             .inner
@@ -184,7 +182,9 @@ impl SnapshotStore {
     /// the previous one. Returns `true` if the snapshot was updated.
     pub async fn refresh_once(&self) -> bool {
         let history = self.action_history();
-        let snapshot = build_snapshot(&self.inner.gt_root, &history).await;
+        let previous = self.get();
+        let mut snapshot = build_snapshot(&self.inner.gt_root, &history).await;
+        stabilize_snapshot(&previous, &mut snapshot);
         self.install_snapshot(snapshot)
     }
 
@@ -299,7 +299,7 @@ impl SnapshotStore {
     }
 
     /// Look up a repo's root path by id from the current snapshot.
-    /// Mirrors `SnapshotStore.get_repo_root` in Python.
+    /// Mirrors `SnapshotStore.get_repo_root` in snapshot contract.
     pub fn get_repo_root(&self, repo_id: &str) -> Option<String> {
         let state = self
             .inner
@@ -381,9 +381,9 @@ impl SnapshotStore {
             .clone()
     }
 
-    /// Port of `SnapshotStore.fetch_diff` — compute `git show` for a repo+sha
+    /// Implementation of `SnapshotStore.fetch_diff` — compute `git show` for a repo+sha
     /// and truncate to 500 lines. Returns a typed payload identical in JSON
-    /// shape to the Python response.
+    /// shape to the snapshot contract response.
     pub async fn fetch_diff(&self, repo_id: &str, sha: &str) -> Result<CachedGitDiff, String> {
         let repo_root = self
             .get_repo_root(repo_id)
@@ -432,7 +432,7 @@ impl SnapshotStore {
     }
 
     /// Send a `gt nudge` asking the target agent to pause. Mirrors
-    /// `SnapshotStore.pause_agent` in Python. Returns the recorded action
+    /// `SnapshotStore.pause_agent` in snapshot contract. Returns the recorded action
     /// payload (also appended to the action history).
     pub async fn pause_agent(&self, target: &str) -> Result<Value, String> {
         let message = "Pause after your current step. Do not take new work or \
@@ -467,7 +467,7 @@ impl SnapshotStore {
     }
 
     /// Send a free-form `gt nudge` to a target agent. Mirrors
-    /// `SnapshotStore.inject_instruction` in Python.
+    /// `SnapshotStore.inject_instruction` in snapshot contract.
     pub async fn inject_instruction(&self, target: &str, message: &str) -> Result<Value, String> {
         if message.trim().is_empty() {
             return Err("Instruction message is empty.".to_string());
@@ -500,7 +500,7 @@ impl SnapshotStore {
         Ok(action)
     }
 
-    /// Port of `SnapshotStore.retry_task`. Uses the graph node's stored status
+    /// Implementation of `SnapshotStore.retry_task`. Uses the graph node's stored status
     /// to pick between `gt unsling` (hooked/running) and `gt release`
     /// (in_progress). Returns the recorded action payload.
     pub async fn retry_task(&self, task_id: &str) -> Result<Value, String> {
@@ -558,7 +558,7 @@ impl SnapshotStore {
         Ok(action)
     }
 
-    /// Port of `SnapshotStore.get_terminal_state`. Performs a live tmux
+    /// Implementation of `SnapshotStore.get_terminal_state`. Performs a live tmux
     /// rediscovery merge, picks Codex or Claude transcripts when available, and
     /// otherwise falls back to a captured pane transcript. Refreshes events
     /// with a fresh `gt feed --since 5m` filtered by target.
@@ -696,7 +696,7 @@ impl SnapshotStore {
         }))
     }
 
-    /// Port of `SnapshotStore.discover_agent`: overlay a fresh tmux scan on top
+    /// Implementation of `SnapshotStore.discover_agent`: overlay a fresh tmux scan on top
     /// of the cached agent so terminal reads pick up the latest pane id,
     /// current command, and path without waiting for the next poll cycle.
     async fn discover_agent(&self, target: &str) -> Option<AgentInfo> {
@@ -788,7 +788,7 @@ impl SnapshotStore {
         if agent.current_path.is_empty() {
             return (json!({}), json!({}));
         }
-        let command = agent.current_command.to_ascii_lowercase();
+        let command = normalize_command_name(&agent.current_command);
         let looks_like_claude = command.is_empty()
             || command == "node"
             || command == "claude"
@@ -841,14 +841,15 @@ impl SnapshotStore {
         }
     }
 
-    /// Port of `SnapshotStore.write_terminal`. Sends keystrokes to the
+    /// Implementation of `SnapshotStore.write_terminal`. Sends keystrokes to the
     /// target's tmux pane. Returns the recorded action payload on success.
     pub async fn write_terminal(&self, target: &str, message: &str) -> Result<Value, String> {
         if message.trim().is_empty() {
             return Err("Terminal message is empty.".to_string());
         }
         let agent = self
-            .get_agent(target)
+            .discover_agent(target)
+            .await
             .ok_or_else(|| format!("Unknown terminal target: {target}"))?;
         if !agent.has_session {
             return Err(format!(
@@ -1025,7 +1026,7 @@ impl SnapshotStore {
     }
 }
 
-/// Return the last `n` entries of a slice, matching Python's `xs[-n:]`.
+/// Return the last `n` entries of a slice, matching snapshot contract's `xs[-n:]`.
 fn tail_n<T: Clone>(items: &[T], n: usize) -> Vec<T> {
     if items.len() <= n {
         items.to_vec()
@@ -1035,7 +1036,7 @@ fn tail_n<T: Clone>(items: &[T], n: usize) -> Vec<T> {
 }
 
 /// Overlay tmux-derived fields from a freshly scanned agent on top of a
-/// cached agent. Mirrors Python's `merged = deep_copy(cached); merged.update(live)`
+/// cached agent. Mirrors snapshot contract's `merged = deep_copy(cached); merged.update(live)`
 /// but restricted to the fields `collect_tmux_agents` actually populates so the
 /// hook, crew, polecat, and task-event state survive the refresh.
 fn merge_agent_overlay(cached: AgentInfo, live: AgentInfo) -> AgentInfo {
@@ -1051,6 +1052,77 @@ fn merge_agent_overlay(cached: AgentInfo, live: AgentInfo) -> AgentInfo {
     merged.pane_id = live.pane_id;
     merged.current_command = live.current_command;
     merged
+}
+
+fn tmux_collection_failed(errors: &[Value]) -> bool {
+    errors.iter().any(|error| {
+        error
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.starts_with("tmux "))
+    })
+}
+
+fn sort_agents(agents: &mut [AgentInfo]) {
+    agents.sort_by(|a, b| {
+        (a.scope.as_str(), a.role.as_str(), a.target.as_str()).cmp(&(
+            b.scope.as_str(),
+            b.role.as_str(),
+            b.target.as_str(),
+        ))
+    });
+}
+
+fn stabilize_snapshot(previous: &WorkspaceSnapshot, next: &mut WorkspaceSnapshot) {
+    let missing_status =
+        next.status.raw.trim().is_empty() && !previous.status.raw.trim().is_empty();
+    let had_tmux_context = !previous.status.tmux_socket.is_empty()
+        || previous.agents.iter().any(|agent| agent.kind == "tmux");
+    let preserve_tmux = had_tmux_context
+        && (missing_status
+            || (next.status.tmux_socket.is_empty() && !previous.status.tmux_socket.is_empty())
+            || tmux_collection_failed(&next.errors));
+
+    if missing_status {
+        next.status = previous.status.clone();
+    }
+
+    if !preserve_tmux {
+        return;
+    }
+
+    let mut agents_by_target: BTreeMap<String, AgentInfo> = next
+        .agents
+        .drain(..)
+        .map(|agent| (agent.target.clone(), agent))
+        .collect();
+
+    for previous_agent in &previous.agents {
+        if previous_agent.kind != "tmux" {
+            continue;
+        }
+        match agents_by_target.remove(&previous_agent.target) {
+            Some(current) => {
+                let needs_tmux_overlay = current.kind != "tmux"
+                    || current.session_name.is_empty()
+                    || current.pane_id.is_empty()
+                    || current.current_path.is_empty()
+                    || current.current_command.is_empty();
+                let merged = if needs_tmux_overlay {
+                    merge_agent_overlay(current, previous_agent.clone())
+                } else {
+                    current
+                };
+                agents_by_target.insert(merged.target.clone(), merged);
+            }
+            None => {
+                agents_by_target.insert(previous_agent.target.clone(), previous_agent.clone());
+            }
+        }
+    }
+
+    next.agents = agents_by_target.into_values().collect();
+    sort_agents(&mut next.agents);
 }
 
 /// Collapse a successful `CommandResult` payload into the `output` string
@@ -1209,7 +1281,7 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
     errors.extend(git_errors);
 
     // Layer linked commits, commit nodes/edges, and the "interesting" filter
-    // onto the raw bead graph. Mirrors `finalize_graph` in `webui/server.py`.
+    // onto the raw bead graph. Mirrors `finalize_graph` in `the runtime contract`.
     let graph = finalize_graph(&bead_data, &git_memory, &convoys);
     let repo_count = git_memory.repos.len() as u32;
 
@@ -1225,7 +1297,7 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
     let task_groups_count = activity.groups.len() as u32;
 
     // Summary counters are derived from the *finalized* graph (post-filter),
-    // matching `build_snapshot` in `webui/server.py` — so totals line up with
+    // matching `build_snapshot` in `the runtime contract` — so totals line up with
     // what the UI actually renders.
     let mut running_tasks: u32 = 0;
     let mut stuck_tasks: u32 = 0;
@@ -1274,7 +1346,7 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
     let git = git_memory.into_json();
 
     let active_agents = agents.iter().filter(|agent| agent.has_session).count() as u32;
-    // Alerts order mirrors Python: daemon → no-running → stuck → risky-crews.
+    // Alerts order mirrors snapshot contract: daemon → no-running → stuck → risky-crews.
     let mut alerts = derive_alerts(&status_summary);
     if running_tasks == 0 && ready_tasks > 0 && active_agents > 0 {
         alerts.push("Agents are alive, but no product tasks are currently running.".to_string());
@@ -1356,7 +1428,7 @@ fn done_event_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"^done:\s+(\S+)$").expect("static regex"))
 }
 
-/// Replay feed events into per-actor and per-target buckets. Mirrors Python's
+/// Replay feed events into per-actor and per-target buckets. Mirrors snapshot contract's
 /// inline loop in `collect_agents`: every event with an actor lands in
 /// `event_map[actor]`; `slung <task> to <target>` appends an `assigned` task
 /// event to `task_event_map[target]`; `done: <task>` appends a `done` task
@@ -1424,8 +1496,8 @@ fn worker_count(total: usize, cap: usize) -> usize {
 /// A discovered beads store — either the town-level `hq` store rooted at
 /// `gt_root` or a per-rig store under `gt_root/<rig>/.beads`.
 ///
-/// Port of the `{"name", "path", "scope"}` dicts returned by
-/// `discover_bead_stores` in `webui/server.py`.
+/// Implementation of the `{"name", "path", "scope"}` dicts returned by
+/// `discover_bead_stores` in `the runtime contract`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BeadStore {
     pub name: String,
@@ -1434,7 +1506,7 @@ pub struct BeadStore {
 }
 
 /// Read `rigs.json` and return the configured rig names, sorted. Mirrors
-/// `configured_rig_names` in `webui/server.py`: malformed JSON, missing file,
+/// `configured_rig_names` in `the runtime contract`: malformed JSON, missing file,
 /// non-object `rigs` entries, or empty keys all collapse to an empty list.
 pub fn configured_rig_names(gt_root: &Path) -> Vec<String> {
     let rigs_path = gt_root.join("rigs.json");
@@ -1459,7 +1531,7 @@ pub fn configured_rig_names(gt_root: &Path) -> Vec<String> {
 }
 
 /// Discover bead stores under `gt_root`. Matches `discover_bead_stores` in
-/// `webui/server.py`:
+/// `the runtime contract`:
 ///
 /// 1. If `gt_root/.beads` exists, emit an `hq` store rooted at `gt_root`.
 /// 2. For each rig in `rigs.json`, if `gt_root/<rig>` is a directory AND
@@ -1526,7 +1598,7 @@ pub struct BeadStoreSnapshot {
     pub status_error: String,
 }
 
-/// Port of the per-store loop inside `collect_bead_data` in `webui/server.py`.
+/// Implementation of the per-store loop inside `collect_bead_data` in `the runtime contract`.
 /// For each discovered store, fan out the four `bd` subprocess calls
 /// (`bd status --json`, `bd list --all --json --limit 300`, `bd blocked
 /// --json`, `bd list --status=hooked --json`) and produce the `store_summaries`
@@ -1559,7 +1631,7 @@ async fn collect_bead_store_summaries(
         let permit_sem = semaphore.clone();
         handles.push(tokio::spawn(async move {
             let _permit = permit_sem.acquire_owned().await.expect("semaphore open");
-            // Python runs `bd status --json` without parse_json so invalid
+            // snapshot contract runs `bd status --json` without parse_json so invalid
             // JSON falls back to the raw stdout; we mirror that by parsing
             // the stdout ourselves below.
             let status_result = run_command(
@@ -1625,7 +1697,7 @@ async fn collect_bead_store_summaries(
 
         // `bd status --json` is run without parse_json so its `data` holds the
         // raw stdout string. On failure we fall back to stdout → error text,
-        // matching Python's `status_result.data if ok else (stdout or error)`.
+        // matching snapshot contract's `status_result.data if ok else (stdout or error)`.
         let status_text: String = if status_result.ok {
             status_result
                 .data
@@ -1750,7 +1822,7 @@ async fn collect_bead_store_summaries(
     }
 
     // Restore input order — `tokio::spawn` resolution order is
-    // non-deterministic but Python preserves the discovery order.
+    // non-deterministic but snapshot contract preserves the discovery order.
     let order: HashMap<String, usize> = stores
         .iter()
         .enumerate()
@@ -1776,7 +1848,7 @@ async fn collect_bead_store_summaries(
 /// Issue `issue_type` values that are rendered on the task graph. Anything
 /// else (messages, escalations, custom types) is filtered out unless it also
 /// qualifies as a system issue. Mirrors `GRAPH_ALLOWED_TYPES` in
-/// `webui/server.py`.
+/// `the runtime contract`.
 const GRAPH_ALLOWED_TYPES: &[&str] = &["task", "bug", "feature", "chore", "decision", "epic"];
 
 fn metadata_block_re() -> &'static Regex {
@@ -1785,7 +1857,7 @@ fn metadata_block_re() -> &'static Regex {
 }
 
 /// Parse a bead description's leading "key: value" metadata block. Mirrors
-/// `parse_simple_metadata_block` in `webui/server.py` — only the first 20
+/// `parse_simple_metadata_block` in `the runtime contract` — only the first 20
 /// lines are inspected, and each line must match a strict `key: value`
 /// regex.
 fn parse_simple_metadata_block(text: &str) -> HashMap<String, String> {
@@ -1888,7 +1960,7 @@ fn derive_ui_status(
     "ready"
 }
 
-/// Rust port of `compact_issue` in `webui/server.py`. Collapses a raw bead
+/// Implementation of `compact_issue` in `the runtime contract`. Collapses a raw bead
 /// payload down to the fields the graph renderer needs, plus the derived
 /// `ui_status` / `is_system` labels.
 fn compact_issue(
@@ -1919,8 +1991,8 @@ fn compact_issue(
     })
 }
 
-/// Port of `collect_bead_data`'s post-per-store processing in
-/// `webui/server.py`. Returned alongside the raw store snapshots gathered by
+/// Implementation of `collect_bead_data`'s post-per-store processing in
+/// `the runtime contract`. Returned alongside the raw store snapshots gathered by
 /// [`collect_bead_store_summaries`] so the two halves can evolve independently.
 #[derive(Debug, Clone, Default)]
 pub struct BeadData {
@@ -1942,11 +2014,11 @@ pub struct BeadData {
     pub merge_links: Vec<Value>,
     /// Derived `ui_status` counters over non-system task nodes, plus a
     /// `system_running` tally for system tasks. Matches the `summary` dict
-    /// Python returns from `collect_bead_data`.
+    /// snapshot contract returns from `collect_bead_data`.
     pub summary: BTreeMap<String, u64>,
 }
 
-/// Rust port of `collect_bead_data` in `webui/server.py`. The per-store `bd`
+/// Implementation of `collect_bead_data` in `the runtime contract`. The per-store `bd`
 /// subprocess fan-out is handled by [`collect_bead_store_summaries`] so the
 /// caller can reuse the same raw snapshots without paying for a second
 /// round of subprocess calls.
@@ -2025,7 +2097,7 @@ pub fn collect_bead_data(
                 }
             }
 
-            // Python's `all_issues[issue_id] = issue` semantics: later stores
+            // snapshot contract's `all_issues[issue_id] = issue` semantics: later stores
             // overwrite the bead. We preserve insertion order from the first
             // time the id was seen so the graph is deterministic.
             if !issue_by_id.contains_key(&id) {
@@ -2159,9 +2231,9 @@ fn crc32_ieee(bytes: &[u8]) -> u32 {
     !crc
 }
 
-/// Stable short id for a repo rooted at `root`. Port of `make_repo_id` in
-/// `webui/server.py`; keeps the exact `repo-<hex>` shape so cached repo ids
-/// persisted in the frontend remain valid across the Python → Rust switch.
+/// Stable short id for a repo rooted at `root`. Implementation of `make_repo_id` in
+/// `the runtime contract`; keeps the exact `repo-<hex>` shape so cached repo ids
+/// persisted in the frontend remain valid across the snapshot contract → Rust switch.
 fn make_repo_id(root: &str) -> String {
     format!("repo-{:x}", crc32_ieee(root.as_bytes()))
 }
@@ -2174,7 +2246,7 @@ fn issue_id_re() -> &'static Regex {
 }
 
 /// Extract every bead id mentioned in `text`, deduplicated and lexicographically
-/// sorted. Mirrors `find_issue_ids` in `webui/server.py`.
+/// sorted. Mirrors `find_issue_ids` in `the runtime contract`.
 fn find_issue_ids(text: &str) -> Vec<String> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for m in issue_id_re().find_iter(text) {
@@ -2184,7 +2256,7 @@ fn find_issue_ids(text: &str) -> Vec<String> {
 }
 
 /// Parse the output of `git status --short --branch`. Mirrors
-/// `parse_git_status` in `webui/server.py`: the first `## ...` line carries the
+/// `parse_git_status` in `the runtime contract`: the first `## ...` line carries the
 /// branch description, every non-blank remaining line counts toward modified
 /// vs. untracked based on the porcelain prefix.
 fn parse_git_status(text: &str) -> Value {
@@ -2213,8 +2285,8 @@ fn parse_git_status(text: &str) -> Value {
 
 /// Parse `git log` output emitted with the `%H%x1f%h%x1f%cI%x1f%D%x1f%s`
 /// format. Records with fewer than five unit-separator fields are skipped so a
-/// truncated line from a git error can't crash the parse. Port of
-/// `parse_git_log` in `webui/server.py`.
+/// truncated line from a git error can't crash the parse. Implementation of
+/// `parse_git_log` in `the runtime contract`.
 fn parse_git_log(text: &str, repo_id: &str, repo_label: &str) -> Vec<Value> {
     let mut commits: Vec<Value> = Vec::new();
     for line in text.lines() {
@@ -2241,7 +2313,7 @@ fn parse_git_log(text: &str, repo_id: &str, repo_label: &str) -> Vec<Value> {
     commits
 }
 
-/// Parse `git branch --format=...` output. Port of `parse_git_branches`.
+/// Parse `git branch --format=...` output. Implementation of `parse_git_branches`.
 /// The format string (`%(HEAD)%x1f%(refname:short)%x1f%(objectname:short)%x1f%(committerdate:iso8601-strict)%x1f%(subject)`)
 /// is owned by `collect_git_memory`; keep the two in lockstep.
 fn parse_git_branches(text: &str) -> Vec<Value> {
@@ -2268,7 +2340,7 @@ fn parse_git_branches(text: &str) -> Vec<Value> {
 }
 
 /// Parse `git worktree list --porcelain` output. Entries are blank-line
-/// separated; each entry is a set of `key value` lines. Port of
+/// separated; each entry is a set of `key value` lines. Implementation of
 /// `parse_worktrees` — normalises the fields the UI actually cares about
 /// (`path`, `head`, `branch`) and strips `refs/heads/` from branch names.
 fn parse_worktrees(text: &str) -> Vec<Value> {
@@ -2309,8 +2381,8 @@ fn parse_worktrees(text: &str) -> Vec<Value> {
         .collect()
 }
 
-/// Port of `collect_git_memory` in `webui/server.py`. Returned structure mirrors
-/// the Python dict 1:1 so the frontend and downstream collectors (`finalize_graph`,
+/// Implementation of `collect_git_memory` in `the runtime contract`. Returned structure mirrors
+/// the snapshot contract dict 1:1 so the frontend and downstream collectors (`finalize_graph`,
 /// future activity grouping) can consume it verbatim.
 #[derive(Debug, Clone, Default)]
 pub struct GitMemory {
@@ -2333,7 +2405,7 @@ pub struct GitMemory {
 }
 
 impl GitMemory {
-    /// Render the git memory as a `serde_json::Value` matching the Python
+    /// Render the git memory as a `serde_json::Value` matching the snapshot contract
     /// shape.
     pub fn into_json(self) -> Value {
         let task_memory: serde_json::Map<String, Value> = self
@@ -2350,7 +2422,7 @@ impl GitMemory {
     }
 }
 
-/// Rust port of `collect_git_memory` in `webui/server.py`. Discovers every git
+/// Implementation of `collect_git_memory` in `the runtime contract`. Discovers every git
 /// repo rooted at the town root or a crew path, fans out the four per-repo
 /// commands (`status`, `log`, `branch`, `worktree list`) in parallel via
 /// `tokio::join!`, and folds the commit history into a `task_id -> memory`
@@ -2682,14 +2754,14 @@ pub async fn collect_git_memory(
     )
 }
 
-/// Rust port of `collect_convoy_data` in `webui/server.py`. Runs
+/// Implementation of `collect_convoy_data` in `the runtime contract`. Runs
 /// `bd list --type=convoy --all --json` once, then folds the raw convoy rows
 /// into the `{convoys, task_index}` shape the frontend expects. The
 /// `task_index` maps each tracked task id to `{total, open, closed,
 /// convoy_ids, all_closed}` so the UI can badge tasks with their enclosing
 /// convoy state.
 ///
-/// Behaviour mirrors the Python port 1:1:
+/// Behaviour mirrors the snapshot contract port 1:1:
 /// - A convoy is considered complete when `status == "closed"`.
 /// - When the raw payload lacks a `tracked` list, dependency edges of type
 ///   `tracks` are used as the fallback source of task ids.
@@ -2767,7 +2839,7 @@ pub async fn collect_convoy_data(gt_root: &Path) -> (Value, Vec<Value>, u64) {
             .unwrap_or(&empty_vec);
 
         // When `tracked` is empty (or missing), fall back to dependency edges
-        // of type `tracks`. Matches the Python `if not tracked_items` branch.
+        // of type `tracks`. Matches the snapshot contract `if not tracked_items` branch.
         let tracked_items: Vec<&Value> = if !tracked.is_empty() {
             tracked.iter().collect()
         } else {
@@ -2876,7 +2948,7 @@ pub async fn collect_convoy_data(gt_root: &Path) -> (Value, Vec<Value>, u64) {
     )
 }
 
-/// Rust port of `finalize_graph` in `webui/server.py`. Takes the raw
+/// Implementation of `finalize_graph` in `the runtime contract`. Takes the raw
 /// `bead_data` graph (nodes + edges) and layers on:
 ///
 /// 1. `linked_commits` (up to three `short_sha`s) and `linked_commit_count`
@@ -2893,7 +2965,7 @@ pub async fn collect_convoy_data(gt_root: &Path) -> (Value, Vec<Value>, u64) {
 ///    their parent task survived. Edges are then pruned to endpoints that
 ///    are still present.
 ///
-/// The output shape is `{nodes, edges}` with the same field schema the Python
+/// The output shape is `{nodes, edges}` with the same field schema the snapshot contract
 /// port returned, so downstream consumers (activity grouping in gui-cqe.10,
 /// the Tauri IPC surface, the frontend graph renderer) need no changes.
 fn finalize_graph(bead_data: &BeadData, git_memory: &GitMemory, convoys: &Value) -> Value {
@@ -2957,7 +3029,7 @@ fn finalize_graph(bead_data: &BeadData, git_memory: &GitMemory, convoys: &Value)
 
     // (2) Build commit nodes + commit edges. Dedup edges with the existing set
     //     so a task that already has an edge to a commit (shouldn't happen
-    //     normally, but Python defends it) isn't double-counted.
+    //     normally, but snapshot contract defends it) isn't double-counted.
     let mut edge_keys: HashSet<(String, String, String)> = edges
         .iter()
         .filter_map(|e| {
@@ -3129,7 +3201,7 @@ fn finalize_graph(bead_data: &BeadData, git_memory: &GitMemory, convoys: &Value)
     })
 }
 
-/// Rust port of `build_activity_groups` in `webui/server.py`. Buckets every
+/// Implementation of `build_activity_groups` in `the runtime contract`. Buckets every
 /// agent by its hooked bead id, enriching each group with the finalized graph
 /// node's title/status/scope (falling back to the agent's hook data when a
 /// node is absent) and the per-task commit/merge memory produced by
@@ -3138,7 +3210,7 @@ fn finalize_graph(bead_data: &BeadData, git_memory: &GitMemory, convoys: &Value)
 ///
 /// Event lists are tailed: up to 6 events per agent payload, up to 10 per
 /// group. Groups are sorted by (system-last, ui_status priority, task_id) to
-/// match the Python contract; unassigned agents are sorted by `target` for
+/// match the snapshot contract contract; unassigned agents are sorted by `target` for
 /// stable rendering.
 fn build_activity_groups(
     agents: &[AgentInfo],
@@ -3166,9 +3238,9 @@ fn build_activity_groups(
         let tail_start = events_len.saturating_sub(6);
         let trimmed_events: Vec<Value> = agent.events[tail_start..].to_vec();
 
-        // Mirror the Python payload: 13 fields only. The remaining AgentInfo
+        // Mirror the snapshot contract payload: 13 fields only. The remaining AgentInfo
         // fields stay at their defaults so this payload serializes with the
-        // shape documented in WEBUI_SNAPSHOT_PARITY.md (`activity.groups[].agents`).
+        // shape documented in SNAPSHOT_CONTRACT.md (`activity.groups[].agents`).
         let hook_payload = if hook.is_null() {
             json!({})
         } else {
@@ -3327,7 +3399,7 @@ fn build_activity_groups(
     }
 }
 
-/// Port of `collect_polecats` in `webui/server.py`. Invokes
+/// Implementation of `collect_polecats` in `the runtime contract`. Invokes
 /// `gt polecat list --all --json` with a generous timeout (this call is one of
 /// the heaviest regular snapshot commands once multiple rigs and persistent
 /// polecats are online).
@@ -3353,7 +3425,7 @@ async fn collect_polecats(gt_root: &Path) -> (Vec<Value>, Vec<Value>, u64) {
     (polecats, Vec::new(), duration_ms)
 }
 
-/// Port of `collect_agents` in `webui/server.py`. Merges tmux panes, crew rows,
+/// Implementation of `collect_agents` in `the runtime contract`. Merges tmux panes, crew rows,
 /// and polecat runtime state into a single agent list, then enriches each
 /// entry with its hook (via parallel `gt hook show <target> --json` calls) and
 /// replays feed events into per-agent `events` / `task_events` / `recent_task`
@@ -3602,9 +3674,12 @@ struct TmuxTarget {
 }
 
 fn parse_tmux_target(gt_root: &Path, pane_path: &str) -> Option<TmuxTarget> {
-    let root = std::fs::canonicalize(gt_root).ok()?;
-    let path = std::fs::canonicalize(pane_path).ok()?;
-    let relative = path.strip_prefix(root).ok()?;
+    let root = normalize_path_value(&gt_root.to_string_lossy());
+    let path = normalize_path_value(pane_path);
+    if root.is_empty() || path.is_empty() {
+        return None;
+    }
+    let relative = Path::new(&path).strip_prefix(Path::new(&root)).ok()?;
     let parts: Vec<String> = relative
         .components()
         .map(|component| component.as_os_str().to_string_lossy().into_owned())
@@ -3710,7 +3785,7 @@ fn crew_path_list(crew: &Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Port of `enrich_crew_workspace` from `webui/server.py`. Normalises
+/// Implementation of `enrich_crew_workspace` from `the runtime contract`. Normalises
 /// `git_modified` / `git_untracked`, partitions them into benign/risky paths
 /// (benign = `.beads/*` or `.gitignore`), and attaches derived status fields
 /// the UI consumes (`git_state`, `git_status_label`, `git_status_tone`,
@@ -3757,7 +3832,7 @@ fn enrich_crew_workspace(crew: &mut Value) {
     map.insert("git_has_local_state_only".into(), json!(has_local_only));
 }
 
-/// Port of `merge_crews` from `webui/server.py`. Combines the `gt crew list
+/// Implementation of `merge_crews` from `the runtime contract`. Combines the `gt crew list
 /// --all --json` catalog with the `gt crew status --json` running-state feed,
 /// keying by `(rig, name)` so the running row's branch/worktree/mail metadata
 /// overlays the catalog entry. Each merged row is passed through
@@ -3818,7 +3893,7 @@ fn merge_crews(all_crews: Vec<Value>, running_crews: Vec<Value>) -> Vec<Value> {
     crews
 }
 
-/// Alerts ported from the Python `build_snapshot` logic that are cheap without
+/// Alerts derived from the snapshot contract `build_snapshot` logic that are cheap without
 /// needing the downstream collectors.
 fn derive_alerts(status: &StatusSummary) -> Vec<String> {
     let mut alerts = Vec::new();
@@ -3997,6 +4072,17 @@ mod tests {
         );
         assert_eq!(terminal_send_mode("node"), TerminalSendMode::ClaudePaste);
         assert_eq!(terminal_send_mode("zsh"), TerminalSendMode::LineKeys);
+    }
+
+    #[test]
+    fn parse_tmux_target_accepts_nonexistent_missing_leaf() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pane_path = tmp.path().join("gtui/polecats/nux/deleted-worktree");
+        let target = parse_tmux_target(tmp.path(), &pane_path.to_string_lossy())
+            .expect("target should parse without requiring the pane cwd to exist");
+        assert_eq!(target.target, "gtui/polecats/nux");
+        assert_eq!(target.role, "polecat");
+        assert_eq!(target.scope, "gtui");
     }
 
     #[test]
@@ -4205,7 +4291,7 @@ mod tests {
         assert_eq!(furiosa_tasks[1]["kind"], "done");
         assert_eq!(furiosa_tasks[1]["task_id"], "gui-cqe.1");
 
-        // done: without an actor is dropped (matches Python: requires `actor`).
+        // done: without an actor is dropped (matches snapshot contract: requires `actor`).
         assert!(!task_event_map.contains_key(""));
 
         // slung with empty actor still routes to target.
@@ -4659,7 +4745,7 @@ mod tests {
 
     #[test]
     fn collect_bead_data_dedupes_across_stores_and_preserves_first_scope() {
-        // Same id appears in both stores; Python's last-write-wins on the
+        // Same id appears in both stores; snapshot contract's last-write-wins on the
         // issue body, but we keep the insertion order so the graph stays
         // deterministic. Scope tracks the last store's scope.
         let store_a = bead_snapshot(
@@ -4762,8 +4848,8 @@ mod tests {
     }
 
     #[test]
-    fn make_repo_id_matches_python_zlib_crc32() {
-        // Expected values produced by Python:
+    fn make_repo_id_matches_contract_zlib_crc32() {
+        // Expected values produced by snapshot contract:
         // `hex(zlib.crc32(b"/home/user/gt") & 0xFFFFFFFF)` etc.
         assert_eq!(make_repo_id(""), "repo-0");
         assert_eq!(make_repo_id("hello"), "repo-3610a686");
@@ -4959,6 +5045,116 @@ mod tests {
         assert_eq!(merged.task_events.len(), 1);
         assert_eq!(merged.recent_task["task_id"], "gui-cqe.12");
         assert_eq!(merged.events.len(), 1);
+    }
+
+    #[test]
+    fn stabilize_snapshot_preserves_tmux_status_and_mayor_on_status_timeout() {
+        let previous = WorkspaceSnapshot {
+            status: StatusSummary {
+                town: "gt".into(),
+                root_path: "/Users/mervinkel/gt".into(),
+                overseer: "mayor".into(),
+                services: vec!["tmux (-L gt-sock, PID 1, 3 sessions)".into()],
+                tmux_socket: "gt-sock".into(),
+                raw: "Town: gt".into(),
+            },
+            agents: vec![AgentInfo {
+                target: "mayor".into(),
+                label: "mayor".into(),
+                role: "mayor".into(),
+                scope: "hq".into(),
+                kind: "tmux".into(),
+                has_session: true,
+                current_path: "/Users/mervinkel/gt/mayor".into(),
+                session_name: "hq-mayor".into(),
+                pane_id: "%44".into(),
+                current_command: "node".into(),
+                ..AgentInfo::default()
+            }],
+            ..WorkspaceSnapshot::default()
+        };
+        let mut next = WorkspaceSnapshot {
+            errors: vec![json!({
+                "command": "gt status --fast",
+                "error": "timed out after 3.0s",
+            })],
+            ..WorkspaceSnapshot::default()
+        };
+
+        stabilize_snapshot(&previous, &mut next);
+
+        assert_eq!(next.status.tmux_socket, "gt-sock");
+        assert_eq!(next.status.raw, "Town: gt");
+        let mayor = next
+            .agents
+            .iter()
+            .find(|agent| agent.target == "mayor")
+            .expect("mayor preserved");
+        assert_eq!(mayor.kind, "tmux");
+        assert_eq!(mayor.session_name, "hq-mayor");
+        assert_eq!(mayor.pane_id, "%44");
+    }
+
+    #[test]
+    fn stabilize_snapshot_restores_tmux_fields_on_external_replacement() {
+        let previous = WorkspaceSnapshot {
+            status: StatusSummary {
+                tmux_socket: "gt-sock".into(),
+                raw: "Town: gt".into(),
+                ..StatusSummary::default()
+            },
+            agents: vec![AgentInfo {
+                target: "gtui/polecats/nux".into(),
+                label: "gtui/polecats/nux".into(),
+                role: "polecat".into(),
+                scope: "gtui".into(),
+                kind: "tmux".into(),
+                has_session: true,
+                current_path: "/Users/mervinkel/gt/gtui/polecats/nux/gtui".into(),
+                session_name: "gtui-nux".into(),
+                pane_id: "%77".into(),
+                current_command: "claude".into(),
+                ..AgentInfo::default()
+            }],
+            ..WorkspaceSnapshot::default()
+        };
+        let mut next = WorkspaceSnapshot {
+            status: StatusSummary {
+                tmux_socket: "gt-sock".into(),
+                raw: "Town: gt".into(),
+                ..StatusSummary::default()
+            },
+            errors: vec![json!({
+                "command": "tmux -L gt-sock list-panes -a -F ...",
+                "error": "timed out after 2.0s",
+            })],
+            agents: vec![AgentInfo {
+                target: "gtui/polecats/nux".into(),
+                label: "gtui/polecats/nux".into(),
+                role: "polecat".into(),
+                scope: "gtui".into(),
+                kind: "external".into(),
+                has_session: true,
+                runtime_state: "working".into(),
+                polecat: json!({"name": "nux", "state": "working"}),
+                ..AgentInfo::default()
+            }],
+            ..WorkspaceSnapshot::default()
+        };
+
+        stabilize_snapshot(&previous, &mut next);
+
+        let nux = next
+            .agents
+            .iter()
+            .find(|agent| agent.target == "gtui/polecats/nux")
+            .expect("nux preserved");
+        assert_eq!(nux.kind, "tmux");
+        assert_eq!(nux.session_name, "gtui-nux");
+        assert_eq!(nux.pane_id, "%77");
+        assert_eq!(nux.current_command, "claude");
+        assert_eq!(nux.runtime_state, "working");
+        assert_eq!(nux.polecat["name"], "nux");
     }
 
     #[tokio::test]

@@ -52,6 +52,7 @@ import {
       hideCompletedConvoys: true,
       primaryInjectDraft: "",
       primarySending: false,
+      bootStartedMs: Date.now(),
       lastSuccessMs: 0,
       inFlight: false,
       diffCache: new Map(),
@@ -261,6 +262,23 @@ import {
         active_polecats: polecats.filter((agent) => agent.has_session).length,
         command_errors: app.snapshot?.errors?.length || 0,
       };
+    }
+
+    function hasCollectedSnapshot(snapshot) {
+      if (!snapshot) return false;
+      if (Number(snapshot.generation_ms || 0) > 0) return true;
+      if ((snapshot.errors || []).length > 0) return true;
+      if ((snapshot.graph?.nodes || []).length > 0) return true;
+      if ((snapshot.stores || []).length > 0) return true;
+      if ((snapshot.agents || []).length > 0) return true;
+      if ((snapshot.crews || []).length > 0) return true;
+      if ((snapshot.git?.repos || []).length > 0) return true;
+      if (String(snapshot.status?.raw || snapshot.vitals_raw || "").trim()) return true;
+      return false;
+    }
+
+    function loadingAgeSeconds() {
+      return Math.max(0, Math.floor((Date.now() - app.bootStartedMs) / 1000));
     }
 
     function getNodeMap() {
@@ -1657,10 +1675,11 @@ returncode: ${esc(error.returncode ?? "")}</pre>
     function updateLivePill(snapshot) {
       const pill = document.getElementById("live-pill");
       const label = document.getElementById("live-label");
-      pill.classList.remove("stale", "error");
+      pill.classList.remove("stale", "error", "loading");
       const age = app.lastSuccessMs ? Math.floor((Date.now() - app.lastSuccessMs) / 1000) : 0;
       if (!app.lastSuccessMs) {
-        label.textContent = "Booting";
+        pill.classList.add("loading");
+        label.textContent = `Loading · ${loadingAgeSeconds()}s`;
         return;
       }
       if ((snapshot.errors?.length || 0) > 0) {
@@ -1674,6 +1693,46 @@ returncode: ${esc(error.returncode ?? "")}</pre>
         return;
       }
       label.textContent = `Live · ${age}s`;
+    }
+
+    function renderLoadingState(snapshot = null) {
+      const age = loadingAgeSeconds();
+      document.getElementById("gt-root").textContent = snapshot?.gt_root || "Resolving GT root...";
+      document.getElementById("snapshot-stamp").textContent = `Collecting first snapshot · ${age}s`;
+      document.getElementById("service-stamp").textContent = "Waiting for gt status and bead stores";
+      document.getElementById("footer-left").textContent = "Initial poll is still running.";
+      document.getElementById("footer-right").textContent = "Building live GT view";
+      document.getElementById("metrics").innerHTML = `
+        <div class="loading-state">
+          <div class="loading-spinner" aria-hidden="true"></div>
+          <div>
+            <div class="loading-title">Collecting live GT data</div>
+            <div class="loading-copy">The first poll runs gt, bd, tmux, and git commands before rendering the dashboard.</div>
+          </div>
+        </div>
+      `;
+      document.getElementById("primary-terminal-summary").textContent = "Waiting for first snapshot";
+      document.getElementById("primary-terminal").innerHTML = `<div class="empty loading-empty">Terminal surfaces will appear after the first live poll finishes.</div>`;
+      document.getElementById("graph-summary").textContent = "loading";
+      document.getElementById("graph-svg").innerHTML = "";
+      document.getElementById("graph-nodes").innerHTML = `<div class="empty loading-empty" style="margin: 18px;">Task spine is loading from GT and bead stores.</div>`;
+      document.getElementById("focus-panel").innerHTML = `<div class="empty loading-empty">Focus controls will appear with the first snapshot.</div>`;
+      document.getElementById("agent-summary").textContent = "loading";
+      document.getElementById("agent-roster").innerHTML = `<div class="empty loading-empty">Agent roster is loading.</div>`;
+      document.getElementById("feed-summary").textContent = "loading";
+      document.getElementById("feed-list").innerHTML = `<div class="empty loading-empty">Swarm activity is loading.</div>`;
+      document.getElementById("git-summary").textContent = "loading";
+      document.getElementById("git-panel").innerHTML = `<div class="empty loading-empty">Git memory is loading.</div>`;
+      document.getElementById("crew-summary").textContent = "loading";
+      document.getElementById("crew-panel").innerHTML = `<div class="empty loading-empty">Crew workspaces are loading.</div>`;
+      document.getElementById("stores-summary").textContent = "loading";
+      document.getElementById("stores-panel").innerHTML = `<div class="empty loading-empty">Bead stores are loading.</div>`;
+      document.getElementById("status-panel").innerHTML = `<div class="empty loading-empty">Status legend is loading.</div>`;
+      document.getElementById("raw-status").textContent = "Waiting for gt status output...";
+      document.getElementById("raw-vitals").textContent = "Waiting for gt vitals output...";
+      renderActions(snapshot?.actions || []);
+      renderErrors([]);
+      updateLivePill(snapshot || {});
     }
 
     function renderAll() {
@@ -1708,8 +1767,14 @@ returncode: ${esc(error.returncode ?? "")}</pre>
     async function fetchSnapshot(force = false) {
       if (app.inFlight && !force) return;
       app.inFlight = true;
+      document.getElementById("refresh-button").disabled = true;
       try {
         const data = await invoke("get_snapshot");
+        if (!hasCollectedSnapshot(data) && !app.lastSuccessMs) {
+          app.snapshot = data;
+          renderLoadingState(data);
+          return;
+        }
         const changed = !app.snapshot || app.snapshot.generated_at !== data.generated_at;
         app.snapshot = data;
         app.lastSuccessMs = Date.now();
@@ -1719,13 +1784,19 @@ returncode: ${esc(error.returncode ?? "")}</pre>
           updateLivePill(app.snapshot);
         }
       } catch (error) {
+        if (!app.lastSuccessMs) {
+          renderLoadingState(app.snapshot);
+          document.getElementById("snapshot-stamp").textContent = `Snapshot request failed · ${String(error)}`;
+        }
         updateLivePill({ errors: [{ error: String(error) }] });
       } finally {
         app.inFlight = false;
+        document.getElementById("refresh-button").disabled = false;
       }
     }
 
     async function fetchPrimaryTerminal(force = false) {
+      if (!app.lastSuccessMs) return;
       const agent = getPrimaryTerminalAgent();
       if (!agent) {
         app.primaryTerminal = null;
@@ -2044,6 +2115,12 @@ returncode: ${esc(error.returncode ?? "")}</pre>
     });
 
     initGraphPan();
-    fetchSnapshot(true).then(() => fetchPrimaryTerminal(true));
+    renderLoadingState();
+    fetchSnapshot(true).then(() => {
+      if (app.lastSuccessMs) fetchPrimaryTerminal(true);
+    });
+    window.setInterval(() => {
+      if (!app.lastSuccessMs) renderLoadingState(app.snapshot);
+    }, 1000);
     window.setInterval(() => fetchPrimaryTerminal(false), 1000);
     window.setInterval(() => fetchSnapshot(false), 4000);

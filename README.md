@@ -2,16 +2,16 @@
 
 GTUI is a desktop dashboard for a [Gas Town](https://github.com/vernon99/gastown)
 workspace. It visualises the task spine, agent activity, git memory, and live
-intervention hooks (retry, pause, nudge, inject) for a local `gt` workspace.
+intervention hooks for a local `gt` workspace.
 
-GTUI ships as a [Tauri](https://tauri.app) application: a native Rust backend
-(`src-tauri/`) embedded with a static single-page WebView frontend (`src/`). The
-original standard-library Python implementation is preserved under
-[`webui/`](webui/README.md) for reference and as a portable fallback.
+GTUI is a [Tauri](https://tauri.app) application: a Rust backend in
+`src-tauri/` hosts a static WebView frontend from `frontend/`. There is no
+local HTTP server or REST API.
 
 ## Screenshots
 
-The screenshots below use representative sample data.
+The screenshots below are rendered from isolated representative fixtures, not
+from a live app run.
 
 ![GTUI task spine view](docs/assets/task-spine.png)
 
@@ -20,99 +20,76 @@ The screenshots below use representative sample data.
 ## Prerequisites
 
 - **Rust toolchain** — stable Rust 1.77 or newer (`rustup install stable`).
-- **Tauri CLI** — `cargo install tauri-cli --version "^2"` (installs `cargo tauri`).
-- **macOS / Linux / Windows** platform dependencies for Tauri — see the
+- **Tauri CLI** — `cargo install tauri-cli --version "^2"` installs
+  `cargo tauri`.
+- **Tauri platform dependencies** — see the
   [Tauri prerequisites guide](https://tauri.app/start/prerequisites/).
-- A local Gas Town workspace (defaults to `~/gt`; override with `GT_ROOT`).
+- A local Gas Town workspace. GTUI defaults to `~/gt`; override with `GT_ROOT`.
 
-The Python webui additionally needs Python 3.9+.
-
-## Quick start
-
-From a fresh clone:
+## Quick Start
 
 ```bash
 cd src-tauri
-cargo tauri dev        # launches the desktop app with hot reload
+cargo tauri dev
 ```
 
-To produce a release binary and runnable app bundle:
+To build a runnable app bundle:
 
 ```bash
 cd src-tauri
 cargo tauri build
 ```
 
-The build outputs land in `src-tauri/target/release/` and, for macOS,
+The macOS bundle is written to
 `src-tauri/target/release/bundle/macos/GTUI.app`. Installer images are an
 explicit packaging step; on macOS, run `cargo tauri build --bundles dmg` when
 you need a `.dmg`.
 
-By default GTUI reads the workspace at `~/gt`. Override that with the `GT_ROOT`
-environment variable before launching:
+To point GTUI at a non-default workspace:
 
 ```bash
 GT_ROOT=/path/to/gt cargo tauri dev
 ```
 
-## Architecture
+## Layout
 
-```
+```text
 gtui/
-├── src-tauri/          # Rust backend (Tauri host process)
+├── frontend/           # Static WebView frontend
+│   ├── index.html
+│   └── static/         # CSS, JS modules, transcript renderers
+├── src-tauri/          # Rust backend and Tauri host process
 │   ├── src/
-│   │   ├── main.rs     # Entry point (delegates to lib::run)
-│   │   ├── lib.rs      # Tauri builder + IPC handler registration
+│   │   ├── main.rs     # Entry point
+│   │   ├── lib.rs      # Tauri builder + IPC registration
 │   │   ├── config.rs   # GT_ROOT / workspace resolution
-│   │   ├── command.rs  # Shell-out helpers for `gt`, `git`, tmux
-│   │   ├── parse.rs    # Parsers for gt / git / session outputs
+│   │   ├── command.rs  # Shell-out helpers for gt, git, tmux
+│   │   ├── parse.rs    # Parsers for gt, git, session outputs
 │   │   ├── sessions.rs # Claude / Codex session discovery
 │   │   ├── models.rs   # Serde types exposed over IPC
 │   │   ├── snapshot.rs # Periodic snapshot builder + cache
 │   │   └── ipc.rs      # #[tauri::command] entry points
-│   ├── capabilities/   # Tauri capability manifests
-│   ├── icons/          # Bundle icons
-│   ├── tests/          # Rust integration tests + fixtures
+│   ├── capabilities/
+│   ├── icons/
+│   ├── tests/
 │   ├── Cargo.toml
 │   └── tauri.conf.json
-│
-├── src/                # Frontend (static SPA loaded by the WebView)
-│   ├── index.html
-│   └── static/         # CSS, JS modules, renderers
-│
-├── webui/              # Legacy Python implementation (see webui/README.md)
-├── docs/               # Supplementary docs and screenshot assets
+├── docs/
+├── scripts/
 └── README.md
 ```
 
-The Rust backend polls the Gas Town workspace on a background Tokio task
-(`SnapshotStore::spawn`), builds an immutable snapshot, and exposes it to the
-frontend via `#[tauri::command]` IPC handlers registered in `lib.rs`. The
-frontend fetches snapshots, terminal transcripts, and git diffs via
-`window.__TAURI__.core.invoke` (see `src/static/js/`).
+The backend polls Gas Town on a background Tokio task, builds immutable
+snapshots, and exposes app actions through Tauri IPC. The frontend calls those
+commands with `window.__TAURI__.core.invoke`.
 
-For how to extend the backend, modify the frontend, or run the test suite, see
-[`docs/developing.md`](docs/developing.md).
-
-## Legacy web UI
-
-[`webui/`](webui/README.md) contains the original implementation: a static HTML
-SPA served by a single-file Python standard-library backend. It predates the
-Tauri port and is preserved for comparison and as a zero-dependency fallback.
-
-```bash
-cd webui
-python3 server.py
-```
-
-Then open <http://127.0.0.1:8420>.
+For development details, see [docs/developing.md](docs/developing.md).
 
 ## Notes
 
-- GTUI is designed for local use. The legacy server binds to `127.0.0.1` by
-  default; the Tauri app runs entirely in-process with no network listener.
-- The backend adds `~/.local/bin` to `PATH` when shelling out so local `gt` and
-  related commands can be discovered.
+- GTUI runs in-process through Tauri; it does not bind a local web server.
+- The backend adds `~/.local/bin` to `PATH` so local `gt` and related commands
+  are discoverable.
 - Runtime logs, PID files, and Tauri build artifacts are git-ignored.
 
 ## License

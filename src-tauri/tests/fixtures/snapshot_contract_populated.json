@@ -1003,7 +1003,7 @@
       {
         "id": "gui-cqe.13",
         "title": "Fix direct terminal write parity",
-        "description": "Add the legacy Codex-specific tmux write path using load-buffer, paste-buffer, Escape, Enter. Also return refreshed terminal in the Tauri write_terminal action so the frontend updates immediately after send.\n\nReference webui/server.py write_terminal action handler.",
+        "description": "Add the retired Codex-specific tmux write path using load-buffer, paste-buffer, Escape, Enter. Also return refreshed terminal in the Tauri write_terminal action so the frontend updates immediately after send.\n\nReference snapshot reference write_terminal action handler.",
         "status": "open",
         "ui_status": "stuck",
         "priority": 1,
@@ -1055,7 +1055,7 @@
       {
         "id": "gui-cqe.15",
         "title": "Run side-by-side smoke tests",
-        "description": "Launch legacy webui and Tauri against the same GT_ROOT. Compare: snapshot counts, first few agents, stores, repos, convoys, selected terminal transcript, load-diff behavior, and visible metric cards.\n\nDocument discrepancies and fix any found.",
+        "description": "Launch retired desktop dashboard and Tauri against the same GT_ROOT. Compare: snapshot counts, first few agents, stores, repos, convoys, selected terminal transcript, load-diff behavior, and visible metric cards.\n\nDocument discrepancies and fix any found.",
         "status": "open",
         "ui_status": "stuck",
         "priority": 1,
@@ -1081,7 +1081,7 @@
       {
         "id": "gui-cqe.16",
         "title": "Performance pass",
-        "description": "The legacy snapshot took ~8.6s live; the current Rust stub is ~1.1s. After porting collectors, keep Rust concurrency intentional: run independent gt, bd, git, and hook commands in bounded parallelism.\n\nProfile and optimize if snapshot time exceeds 3s.",
+        "description": "The retired snapshot took ~8.6s live; the current Rust stub is ~1.1s. After porting collectors, keep Rust concurrency intentional: run independent gt, bd, git, and hook commands in bounded parallelism.\n\nProfile and optimize if snapshot time exceeds 3s.",
         "status": "open",
         "ui_status": "stuck",
         "priority": 1,
@@ -1107,7 +1107,7 @@
       {
         "id": "gui-cqe.17",
         "title": "Regression gate",
-        "description": "Final acceptance: cargo test, fixture parity tests, live snapshot comparison, and visual screenshots showing Tauri has non-empty Task Spine, Git Memory, Bead Stores, Crew Workspaces, Convoys-derived filtering, and actionable Focus controls.\n\nAll tests must pass. No regressions vs legacy webui.",
+        "description": "Final acceptance: cargo test, fixture parity tests, live snapshot comparison, and visual screenshots showing Tauri has non-empty Task Spine, Git Memory, Bead Stores, Crew Workspaces, Convoys-derived filtering, and actionable Focus controls.\n\nAll tests must pass. No regressions vs retired desktop dashboard.",
         "status": "open",
         "ui_status": "stuck",
         "priority": 1,
@@ -1133,7 +1133,7 @@
       {
         "id": "gui-cqe.10",
         "title": "Port activity grouping",
-        "description": "Port build_activity_groups: hooked task groups, unassigned live agents, group memory links, event rollups, and sort ordering.\n\nReference webui/server.py build_activity_groups.",
+        "description": "Port build_activity_groups: hooked task groups, unassigned live agents, group memory links, event rollups, and sort ordering.\n\nReference snapshot reference build_activity_groups.",
         "status": "open",
         "ui_status": "stuck",
         "priority": 1,
@@ -1159,7 +1159,7 @@
       {
         "id": "gui-cqe.11",
         "title": "Rebuild summary and alerts",
-        "description": "Replace the current Tauri placeholder summary with legacy-derived counters: running/stuck/ready/done/system tasks, task groups, repo count, stored and derived status counts. Restore alerts like \"agents alive but no product tasks running\" and \"N dependency-blocked tasks.\"\n\nReference webui/server.py summary and alerts generation.",
+        "description": "Replace the current Tauri placeholder summary with retired-derived counters: running/stuck/ready/done/system tasks, task groups, repo count, stored and derived status counts. Restore alerts like \"agents alive but no product tasks running\" and \"N dependency-blocked tasks.\"\n\nReference snapshot reference summary and alerts generation.",
         "status": "open",
         "ui_status": "stuck",
         "priority": 1,
@@ -1185,7 +1185,7 @@
       {
         "id": "gui-cqe.12",
         "title": "Close terminal endpoint gaps",
-        "description": "Match legacy get_terminal_state: live agent rediscovery, fresh gt feed --since 5m, codex_view, claude_view, task_events, recent_task, normalized terminal logs, and hook fallback behavior.\n\nReference webui/server.py get_terminal_state.",
+        "description": "Match retired get_terminal_state: live agent rediscovery, fresh gt feed --since 5m, codex_view, claude_view, task_events, recent_task, normalized terminal logs, and hook fallback behavior.\n\nReference snapshot reference get_terminal_state.",
         "status": "open",
         "ui_status": "stuck",
         "priority": 1,
@@ -1211,7 +1211,7 @@
       {
         "id": "gui-cqe.7",
         "title": "Port git memory",
-        "description": "Port repo discovery and parsers for: git status --short --branch, git log, git branch, git worktree list, task-id extraction, recent commits, and task_memory.\n\nReference webui/server.py git memory collection.",
+        "description": "Port repo discovery and parsers for: git status --short --branch, git log, git branch, git worktree list, task-id extraction, recent commits, and task_memory.\n\nReference snapshot reference git memory collection.",
         "status": "open",
         "ui_status": "stuck",
         "priority": 1,
@@ -1237,7 +1237,7 @@
       {
         "id": "gui-cqe.8",
         "title": "Port convoy data",
-        "description": "Port collect_convoy_data, including convoys, tracked_ids, completion counts, and task_index.\n\nReference webui/server.py collect_convoy_data.",
+        "description": "Port collect_convoy_data, including convoys, tracked_ids, completion counts, and task_index.\n\nReference snapshot reference collect_convoy_data.",
         "status": "open",
         "ui_status": "stuck",
         "priority": 1,
@@ -1263,7 +1263,7 @@
       {
         "id": "gui-cqe.9",
         "title": "Port graph finalization",
-        "description": "Port finalize_graph: attach linked commit counts, create commit nodes, add commit edges, include convoy-linked nodes, and filter to interesting task/commit nodes.\n\nReference webui/server.py finalize_graph.",
+        "description": "Port finalize_graph: attach linked commit counts, create commit nodes, add commit edges, include convoy-linked nodes, and filter to interesting task/commit nodes.\n\nReference snapshot reference finalize_graph.",
         "status": "open",
         "ui_status": "stuck",
         "priority": 1,
@@ -1289,7 +1289,7 @@
       {
         "id": "gui-cqe.3",
         "title": "Port crew merge/enrichment",
-        "description": "Port merge_crews, enrich_crew_workspace, risky-change detection, branch/worktree metadata, and crew status merging from webui/server.py. This unblocks accurate crew cards and risky workspace alerts.\n\nReference webui/server.py for the exact merge logic. The Rust port should produce identical JSON shapes for crew data.",
+        "description": "Port merge_crews, enrich_crew_workspace, risky-change detection, branch/worktree metadata, and crew status merging from snapshot reference. This unblocks accurate crew cards and risky workspace alerts.\n\nReference snapshot reference for the exact merge logic. The Rust port should produce identical JSON shapes for crew data.",
         "status": "open",
         "ui_status": "stuck",
         "priority": 1,
@@ -1315,7 +1315,7 @@
       {
         "id": "gui-cqe.4",
         "title": "Port agent hook collection",
-        "description": "Extend Rust collect_agents to match legacy behavior: gt hook show <target> --json, hook_by_issue, feed-event mapping, task_events, recent_task, polecat runtime state, and hook metadata.\n\nReference webui/server.py collect_agents and related helpers.",
+        "description": "Extend Rust collect_agents to match retired behavior: gt hook show <target> --json, hook_by_issue, feed-event mapping, task_events, recent_task, polecat runtime state, and hook metadata.\n\nReference snapshot reference collect_agents and related helpers.",
         "status": "open",
         "ui_status": "stuck",
         "priority": 1,
@@ -1341,7 +1341,7 @@
       {
         "id": "gui-cqe.5",
         "title": "Port bead store discovery",
-        "description": "Port discover_bead_stores and configured rig discovery. Rust should discover hq plus rig stores and emit stores summaries.\n\nReference webui/server.py discover_bead_stores.",
+        "description": "Port discover_bead_stores and configured rig discovery. Rust should discover hq plus rig stores and emit stores summaries.\n\nReference snapshot reference discover_bead_stores.",
         "status": "open",
         "ui_status": "stuck",
         "priority": 1,
@@ -1367,7 +1367,7 @@
       {
         "id": "gui-cqe.6",
         "title": "Port bead data collection",
-        "description": "Port collect_bead_data: bd status, bd list --all, bd blocked, bd list --status=hooked, issue compaction, blocked/hooked IDs, dependency edges, merge bead links, and per-store counts.\n\nReference webui/server.py collect_bead_data and related helpers.",
+        "description": "Port collect_bead_data: bd status, bd list --all, bd blocked, bd list --status=hooked, issue compaction, blocked/hooked IDs, dependency edges, merge bead links, and per-store counts.\n\nReference snapshot reference collect_bead_data and related helpers.",
         "status": "open",
         "ui_status": "stuck",
         "priority": 1,
@@ -1393,7 +1393,7 @@
       {
         "id": "gui-cqe.2",
         "title": "Add snapshot parity tests",
-        "description": "Add Rust integration tests that build a snapshot from fixtures and assert the old-webui-equivalent fields are populated. Start broad: non-empty graph, stores, repos, convoys, activity groups, linked commits, and summary counters.\n\nTests should compare against the fixture captured in gui-cqe.1. Use assert macros that give clear diffs on failure.",
+        "description": "Add Rust integration tests that build a snapshot from fixtures and assert the retired-dashboard-equivalent fields are populated. Start broad: non-empty graph, stores, repos, convoys, activity groups, linked commits, and summary counters.\n\nTests should compare against the fixture captured in gui-cqe.1. Use assert macros that give clear diffs on failure.",
         "status": "open",
         "ui_status": "stuck",
         "priority": 1,
@@ -1418,8 +1418,8 @@
       },
       {
         "id": "gui-cqe.1",
-        "title": "Capture legacy webui snapshot fixtures",
-        "description": "attached_molecule: gui-wisp-troy\nattached_formula: mol-polecat-work\nattached_at: 2026-04-22T07:09:56Z\nattached_vars: [\"base_branch=main\"]\ndispatched_by: unknown\nformula_vars: base_branch=main\n\nCapture legacy webui snapshot JSON from /Users/mervinkel/gt and add one or two fixture workspaces for repeatable tests. The parity target should be JSON shape plus key counts for graph, activity, git, convoys, stores, agents, summary, and alerts.\n\nRun webui/server.py, hit GET /api/snapshot, save the full JSON response as a fixture file in src-tauri/tests/fixtures/. Create a second fixture with a minimal/empty workspace state. Document the expected field shapes.",
+        "title": "Capture retired desktop dashboard snapshot fixtures",
+        "description": "attached_molecule: gui-wisp-troy\nattached_formula: mol-polecat-work\nattached_at: 2026-04-22T07:09:56Z\nattached_vars: [\"base_branch=main\"]\ndispatched_by: unknown\nformula_vars: base_branch=main\n\nCapture retired desktop dashboard snapshot JSON from /Users/mervinkel/gt and add one or two fixture workspaces for repeatable tests. The parity target should be JSON shape plus key counts for graph, activity, git, convoys, stores, agents, summary, and alerts.\n\nRun snapshot reference, hit GET /api/snapshot, save the full JSON response as a fixture file in src-tauri/tests/fixtures/. Create a second fixture with a minimal/empty workspace state. Document the expected field shapes.",
         "status": "hooked",
         "ui_status": "running",
         "priority": 1,
@@ -1446,8 +1446,8 @@
       },
       {
         "id": "gui-cqe",
-        "title": "Feature parity: port all legacy webui collectors to Tauri",
-        "description": "Complete feature parity between legacy webui/server.py and the Tauri Rust backend.\n\nThe first mountain run built the Tauri scaffolding and basic IPC. This run ports\nevery collector, parser, and endpoint from the Python backend so the Tauri app\nshows identical data: graph, activity, git memory, bead stores, convoys, crew,\nagents, terminals, alerts, and actions.\n\nSequential chain — each step builds on the previous.",
+        "title": "Feature parity: port all retired desktop dashboard collectors to Tauri",
+        "description": "Complete feature parity between retired snapshot reference and the Tauri Rust backend.\n\nThe first mountain run built the Tauri scaffolding and basic IPC. This run ports\nevery collector, parser, and endpoint from the retired backend backend so the Tauri app\nshows identical data: graph, activity, git memory, bead stores, convoys, crew,\nagents, terminals, alerts, and actions.\n\nSequential chain — each step builds on the previous.",
         "status": "open",
         "ui_status": "ready",
         "priority": 1,
@@ -1473,7 +1473,7 @@
       {
         "id": "gui-bn8.10",
         "title": "Build configuration, packaging, and documentation",
-        "description": "attached_molecule: gui-wisp-527b\nattached_formula: mol-polecat-work\nattached_at: 2026-04-22T06:01:02Z\nattached_vars: [\"base_branch=main\"]\ndispatched_by: unknown\nformula_vars: base_branch=main\n\nFinalize the Tauri app for distribution and document the project:\n\n1. **Build configuration**:\n   - Verify `cargo tauri build` produces a working .app bundle (macOS)\n   - Configure app icon (can use a placeholder icon for now)\n   - Set app identifier (e.g., com.gastown.gtui)\n   - Configure minimum window size, default size (1400x900)\n   - Ensure release build optimizations (Rust release profile)\n\n2. **Update root README.md**:\n   - Document the Tauri app: what it is, how to build, how to run\n   - Document the legacy web UI in webui/\n   - Prerequisites: Rust toolchain, Tauri CLI\n   - Quick start: `cargo tauri dev` for development, `cargo tauri build` for release\n   - Architecture overview: Rust backend (src-tauri/), frontend (src/)\n\n3. **Developer documentation**:\n   - How to add new Tauri commands\n   - How to modify the frontend\n   - How to run tests\n   - Project structure diagram\n\n4. **Cleanup**:\n   - Remove any TODO/FIXME comments\n   - Ensure .gitignore covers all build artifacts\n   - Verify clean build from fresh clone\n\nAcceptance: `cargo tauri build` succeeds. README is comprehensive. Fresh clone builds cleanly.",
+        "description": "attached_molecule: gui-wisp-527b\nattached_formula: mol-polecat-work\nattached_at: 2026-04-22T06:01:02Z\nattached_vars: [\"base_branch=main\"]\ndispatched_by: unknown\nformula_vars: base_branch=main\n\nFinalize the Tauri app for distribution and document the project:\n\n1. **Build configuration**:\n   - Verify `cargo tauri build` produces a working .app bundle (macOS)\n   - Configure app icon (can use a placeholder icon for now)\n   - Set app identifier (e.g., com.gastown.gtui)\n   - Configure minimum window size, default size (1400x900)\n   - Ensure release build optimizations (Rust release profile)\n\n2. **Update root README.md**:\n   - Document the Tauri app: what it is, how to build, how to run\n   - Document the retired desktop dashboard in retired-dashboard/\n   - Prerequisites: Rust toolchain, Tauri CLI\n   - Quick start: `cargo tauri dev` for development, `cargo tauri build` for release\n   - Architecture overview: Rust backend (src-tauri/), frontend (frontend/)\n\n3. **Developer documentation**:\n   - How to add new Tauri commands\n   - How to modify the frontend\n   - How to run tests\n   - Project structure diagram\n\n4. **Cleanup**:\n   - Remove any TODO/FIXME comments\n   - Ensure .gitignore covers all build artifacts\n   - Verify clean build from fresh clone\n\nAcceptance: `cargo tauri build` succeeds. README is comprehensive. Fresh clone builds cleanly.",
         "status": "closed",
         "ui_status": "done",
         "priority": 1,
@@ -1499,7 +1499,7 @@
       {
         "id": "gui-bn8.9",
         "title": "End-to-end smoke test and feature parity verification",
-        "description": "attached_molecule: gui-wisp-342r\nattached_formula: mol-polecat-work\nattached_at: 2026-04-22T05:47:19Z\nattached_vars: [\"base_branch=main\"]\ndispatched_by: unknown\nformula_vars: base_branch=main\n\nVerify the Tauri app has 100% feature parity with the web UI:\n\n1. **Side-by-side comparison**:\n   - Run webui/server.py on port 8420\n   - Run `cargo tauri dev` for the Tauri app\n   - Compare both UIs feature by feature\n\n2. **Feature checklist** (must all work in Tauri app):\n   - [ ] Dashboard loads with workspace metrics\n   - [ ] Agent roster shows all agents with correct status\n   - [ ] Task spine graph renders SVG DAG correctly\n   - [ ] Activity feed shows grouped agent activity\n   - [ ] Clicking an agent shows their transcript\n   - [ ] Claude transcript renderer displays tool calls/results\n   - [ ] Codex transcript renderer displays event streams\n   - [ ] Git diff viewer loads and displays diffs on demand\n   - [ ] Retry task action works\n   - [ ] Pause agent action works\n   - [ ] Inject message action works\n   - [ ] Write terminal action works\n   - [ ] Real-time polling updates dashboard every ~1s\n   - [ ] Crew workspaces section displays correctly\n   - [ ] Bead stores section displays correctly\n\n3. **Edge cases**:\n   - App behavior when gt CLI is not available\n   - App behavior when Dolt is down\n   - App behavior with no active agents/tasks\n   - Window resize / responsive layout\n\n4. **Fix any discrepancies** found during comparison.\n\nAcceptance: All checklist items pass. No visual or functional regressions vs web UI.",
+        "description": "attached_molecule: gui-wisp-342r\nattached_formula: mol-polecat-work\nattached_at: 2026-04-22T05:47:19Z\nattached_vars: [\"base_branch=main\"]\ndispatched_by: unknown\nformula_vars: base_branch=main\n\nVerify the Tauri app has 100% feature parity with the desktop UI:\n\n1. **Side-by-side comparison**:\n   - Run snapshot reference on local IPC\n   - Run `cargo tauri dev` for the Tauri app\n   - Compare both UIs feature by feature\n\n2. **Feature checklist** (must all work in Tauri app):\n   - [ ] Dashboard loads with workspace metrics\n   - [ ] Agent roster shows all agents with correct status\n   - [ ] Task spine graph renders SVG DAG correctly\n   - [ ] Activity feed shows grouped agent activity\n   - [ ] Clicking an agent shows their transcript\n   - [ ] Claude transcript renderer displays tool calls/results\n   - [ ] Codex transcript renderer displays event streams\n   - [ ] Git diff viewer loads and displays diffs on demand\n   - [ ] Retry task action works\n   - [ ] Pause agent action works\n   - [ ] Inject message action works\n   - [ ] Write terminal action works\n   - [ ] Real-time polling updates dashboard every ~1s\n   - [ ] Crew workspaces section displays correctly\n   - [ ] Bead stores section displays correctly\n\n3. **Edge cases**:\n   - App behavior when gt CLI is not available\n   - App behavior when Dolt is down\n   - App behavior with no active agents/tasks\n   - Window resize / responsive layout\n\n4. **Fix any discrepancies** found during comparison.\n\nAcceptance: All checklist items pass. No visual or functional regressions vs desktop UI.",
         "status": "closed",
         "ui_status": "done",
         "priority": 1,
@@ -1551,7 +1551,7 @@
       {
         "id": "gui-bn8.7",
         "title": "Adapt frontend JavaScript to use Tauri IPC instead of fetch",
-        "description": "attached_molecule: gui-wisp-v0rn\nattached_formula: mol-polecat-work\nattached_at: 2026-04-22T05:39:24Z\nattached_vars: [\"base_branch=main\"]\ndispatched_by: unknown\nformula_vars: base_branch=main\n\nRewrite all frontend fetch() calls in app.js to use Tauri's invoke() IPC:\n\n1. **Copy JS files** from webui/ to src/:\n   - app.js → src/static/js/app.js  \n   - renderers/ → src/static/js/renderers/ (claude.js, codex.js, markdown.js, index.js, html.js)\n\n2. **Replace fetch-based API calls** with Tauri invoke:\n   - `fetch('/api/snapshot')` → `window.__TAURI__.core.invoke('get_snapshot')`\n   - `fetch('/api/terminal?target=...')` → `invoke('get_terminal', { target: ... })`\n   - `fetch('/api/git/diff?repo=...&sha=...')` → `invoke('get_git_diff', { repo: ..., sha: ... })`\n   - `fetch('/api/action/retry-task', {method:'POST',...})` → `invoke('retry_task', { taskId: ... })`\n   - `fetch('/api/action/pause-agent', ...)` → `invoke('pause_agent', { agentId: ... })`\n   - `fetch('/api/action/inject', ...)` → `invoke('inject_message', { agentId: ..., message: ... })`\n   - `fetch('/api/action/write-terminal', ...)` → `invoke('write_terminal', { agentId: ..., text: ... })`\n\n3. **Handle response differences**:\n   - fetch returns Response objects needing .json() — invoke returns parsed objects directly\n   - Error handling: fetch uses response.ok checks — invoke throws on Rust Err()\n   - Adapt polling loop to use invoke instead of fetch\n\n4. **Renderers**: These should need minimal changes (they process data, not fetch it).\n   Verify claude.js, codex.js, markdown.js still work with the same data shapes.\n\n5. **Verify**: `cargo tauri dev` shows the full dashboard with live data polling.\n\nReference webui/static/js/app.js for every fetch() call site.",
+        "description": "attached_molecule: gui-wisp-v0rn\nattached_formula: mol-polecat-work\nattached_at: 2026-04-22T05:39:24Z\nattached_vars: [\"base_branch=main\"]\ndispatched_by: unknown\nformula_vars: base_branch=main\n\nRewrite all frontend fetch() calls in app.js to use Tauri's invoke() IPC:\n\n1. **Copy JS files** from retired-dashboard/ to src/:\n   - app.js → frontend/static/js/app.js  \n   - renderers/ → frontend/static/js/renderers/ (claude.js, codex.js, markdown.js, index.js, html.js)\n\n2. **Replace fetch-based API calls** with Tauri invoke:\n   - `fetch('/api/snapshot')` → `window.__TAURI__.core.invoke('get_snapshot')`\n   - `fetch('/api/terminal?target=...')` → `invoke('get_terminal', { target: ... })`\n   - `fetch('/api/git/diff?repo=...&sha=...')` → `invoke('get_git_diff', { repo: ..., sha: ... })`\n   - `fetch('/api/action/retry-task', {method:'POST',...})` → `invoke('retry_task', { taskId: ... })`\n   - `fetch('/api/action/pause-agent', ...)` → `invoke('pause_agent', { agentId: ... })`\n   - `fetch('/api/action/inject', ...)` → `invoke('inject_message', { agentId: ..., message: ... })`\n   - `fetch('/api/action/write-terminal', ...)` → `invoke('write_terminal', { agentId: ..., text: ... })`\n\n3. **Handle response differences**:\n   - fetch returns Response objects needing .json() — invoke returns parsed objects directly\n   - Error handling: fetch uses response.ok checks — invoke throws on Rust Err()\n   - Adapt polling loop to use invoke instead of fetch\n\n4. **Renderers**: These should need minimal changes (they process data, not fetch it).\n   Verify claude.js, codex.js, markdown.js still work with the same data shapes.\n\n5. **Verify**: `cargo tauri dev` shows the full dashboard with live data polling.\n\nReference retired-dashboard/static/js/app.js for every fetch() call site.",
         "status": "closed",
         "ui_status": "done",
         "priority": 1,
@@ -1576,8 +1576,8 @@
       },
       {
         "id": "gui-bn8.6",
-        "title": "Port frontend HTML and CSS to Tauri src/",
-        "description": "attached_molecule: gui-wisp-j52o\nattached_formula: mol-polecat-work\nattached_at: 2026-04-22T04:56:04Z\nattached_vars: [\"base_branch=main\"]\ndispatched_by: mayor\nformula_vars: base_branch=main\n\nCopy and adapt the frontend files from webui/ to Tauri's src/ directory:\n\n1. **index.html** → src/index.html\n   - Keep same structure\n   - Add Tauri v2 IPC script: <script src=\"https://unpkg.com/@anthropic-ai/tauri-api\"></script> or use the Tauri withGlobalTauri build option\n   - Ensure tauri.conf.json points to src/ as the frontend dist directory\n\n2. **CSS** → src/static/css/app.css (or src/css/app.css)\n   - Copy app.css as-is\n   - Adjust any viewport/scrollbar styles for native window (remove browser chrome assumptions)\n   - Ensure the CSS works in WebView2/WebKit context\n\n3. **Static assets**: Ensure path references in HTML match new directory layout\n\n4. Update tauri.conf.json \"build\" section to point frontendDist at the src/ directory\n\nDo NOT modify the JavaScript yet (that's a separate task). Just get the HTML shell and CSS rendering in the Tauri window.\nVerify: `cargo tauri dev` opens a window showing the HTML structure (JS will be broken, that's expected).",
+        "title": "Port frontend HTML and CSS to frontend/",
+        "description": "attached_molecule: gui-wisp-j52o\nattached_formula: mol-polecat-work\nattached_at: 2026-04-22T04:56:04Z\nattached_vars: [\"base_branch=main\"]\ndispatched_by: mayor\nformula_vars: base_branch=main\n\nCopy and adapt the frontend files from retired-dashboard/ to frontend/ directory:\n\n1. **index.html** → frontend/index.html\n   - Keep same structure\n   - Add Tauri v2 IPC script: <script src=\"https://unpkg.com/@anthropic-ai/tauri-api\"></script> or use the Tauri withGlobalTauri build option\n   - Ensure tauri.conf.json points to frontend/ as the frontend dist directory\n\n2. **CSS** → frontend/static/css/app.css (or src/css/app.css)\n   - Copy app.css as-is\n   - Adjust any viewport/scrollbar styles for native window (remove browser chrome assumptions)\n   - Ensure the CSS works in WebView2/WebKit context\n\n3. **Static assets**: Ensure path references in HTML match new directory layout\n\n4. Update tauri.conf.json \"build\" section to point frontendDist at the frontend/ directory\n\nDo NOT modify the JavaScript yet (that's a separate task). Just get the HTML shell and CSS rendering in the Tauri window.\nVerify: `cargo tauri dev` opens a window showing the HTML structure (JS will be broken, that's expected).",
         "status": "closed",
         "ui_status": "done",
         "priority": 1,
@@ -1603,7 +1603,7 @@
       {
         "id": "gui-bn8.5",
         "title": "Implement Tauri IPC commands matching REST API",
-        "description": "attached_molecule: gui-wisp-bxut\nattached_formula: mol-polecat-work\nattached_at: 2026-04-22T05:29:48Z\nattached_vars: [\"base_branch=main\"]\ndispatched_by: unknown\nformula_vars: base_branch=main\n\nCreate Tauri command handlers that replace the Python HTTP endpoints:\n\n1. **get_snapshot** → replaces GET /api/snapshot\n   - Returns full WorkspaceSnapshot as JSON via Tauri IPC\n   - Reads from SnapshotStore (Arc<Mutex<>>)\n\n2. **get_terminal** → replaces GET /api/terminal?target=...\n   - Takes target agent identifier as parameter\n   - Returns terminal state (transcript content) for the specified agent\n\n3. **get_git_diff** → replaces GET /api/git/diff?repo=...&sha=...\n   - Takes repo path and SHA as parameters\n   - Returns cached or freshly computed git diff\n\n4. **Action commands** → replace POST /api/action/*:\n   - retry_task(task_id) → replaces /api/action/retry-task\n   - pause_agent(agent_id) → replaces /api/action/pause-agent\n   - inject_message(agent_id, message) → replaces /api/action/inject\n   - write_terminal(agent_id, text) → replaces /api/action/write-terminal\n\nRegister all commands in main.rs via tauri::Builder::default().invoke_handler(tauri::generate_handler![...])\n\nEach command should have proper error handling returning Result<T, String>.\nWrite integration tests that verify command registration and basic invocation.\n\nReference webui/server.py GTUIHandler class for exact request/response shapes.",
+        "description": "attached_molecule: gui-wisp-bxut\nattached_formula: mol-polecat-work\nattached_at: 2026-04-22T05:29:48Z\nattached_vars: [\"base_branch=main\"]\ndispatched_by: unknown\nformula_vars: base_branch=main\n\nCreate Tauri command handlers that replace the retired backend HTTP endpoints:\n\n1. **get_snapshot** → replaces GET /api/snapshot\n   - Returns full WorkspaceSnapshot as JSON via Tauri IPC\n   - Reads from SnapshotStore (Arc<Mutex<>>)\n\n2. **get_terminal** → replaces GET /api/terminal?target=...\n   - Takes target agent identifier as parameter\n   - Returns terminal state (transcript content) for the specified agent\n\n3. **get_git_diff** → replaces GET /api/git/diff?repo=...&sha=...\n   - Takes repo path and SHA as parameters\n   - Returns cached or freshly computed git diff\n\n4. **Action commands** → replace POST /api/action/*:\n   - retry_task(task_id) → replaces /api/action/retry-task\n   - pause_agent(agent_id) → replaces /api/action/pause-agent\n   - inject_message(agent_id, message) → replaces /api/action/inject\n   - write_terminal(agent_id, text) → replaces /api/action/write-terminal\n\nRegister all commands in main.rs via tauri::Builder::default().invoke_handler(tauri::generate_handler![...])\n\nEach command should have proper error handling returning Result<T, String>.\nWrite integration tests that verify command registration and basic invocation.\n\nReference snapshot reference GTUIHandler class for exact request/response shapes.",
         "status": "closed",
         "ui_status": "done",
         "priority": 1,
@@ -1629,7 +1629,7 @@
       {
         "id": "gui-bn8.4",
         "title": "Port snapshot building and caching logic to Rust",
-        "description": "attached_molecule: gui-wisp-4pyc\nattached_formula: mol-polecat-work\nattached_at: 2026-04-22T05:17:45Z\nattached_vars: [\"base_branch=main\"]\ndispatched_by: unknown\nformula_vars: base_branch=main\n\nPort the SnapshotStore class and build_snapshot() from Python to Rust:\n\n1. **SnapshotStore**: Arc<Mutex<>> wrapped state manager\n   - Continuous polling via tokio::spawn background task (configurable interval, default 1s)\n   - Thread-safe snapshot access\n   - Action history ring buffer (last 24 actions)\n\n2. **build_snapshot()**: Orchestrate parallel gt CLI calls via tokio::join!\n   - gt status → parse workspace status\n   - gt vitals → parse health metrics  \n   - gt crew → parse crew info\n   - gt feed → parse activity feed\n   - Collect agent activity (Codex + Claude session scanning)\n   - Build task dependency graph with Git lineage\n   - Generate activity groups and metrics\n\n3. **Caching layer**:\n   - Codex session list cache (3s TTL)\n   - Claude session list cache (3s TTL)\n   - Git diff cache (HashMap, no TTL — memory-managed)\n   - Signature-based change detection (skip re-render if unchanged)\n\n4. **Session scanning**: \n   - Read ~/.codex/sessions/ for Codex rollout logs\n   - Read ~/.claude/projects/ for Claude project metadata + transcripts\n\nReference webui/server.py SnapshotStore class and build_snapshot() function.\nWrite unit tests for cache TTL behavior and snapshot diffing logic.",
+        "description": "attached_molecule: gui-wisp-4pyc\nattached_formula: mol-polecat-work\nattached_at: 2026-04-22T05:17:45Z\nattached_vars: [\"base_branch=main\"]\ndispatched_by: unknown\nformula_vars: base_branch=main\n\nPort the SnapshotStore class and build_snapshot() from retired backend to Rust:\n\n1. **SnapshotStore**: Arc<Mutex<>> wrapped state manager\n   - Continuous polling via tokio::spawn background task (configurable interval, default 1s)\n   - Thread-safe snapshot access\n   - Action history ring buffer (last 24 actions)\n\n2. **build_snapshot()**: Orchestrate parallel gt CLI calls via tokio::join!\n   - gt status → parse workspace status\n   - gt vitals → parse health metrics  \n   - gt crew → parse crew info\n   - gt feed → parse activity feed\n   - Collect agent activity (Codex + Claude session scanning)\n   - Build task dependency graph with Git lineage\n   - Generate activity groups and metrics\n\n3. **Caching layer**:\n   - Codex session list cache (3s TTL)\n   - Claude session list cache (3s TTL)\n   - Git diff cache (HashMap, no TTL — memory-managed)\n   - Signature-based change detection (skip re-render if unchanged)\n\n4. **Session scanning**: \n   - Read ~/.codex/sessions/ for Codex rollout logs\n   - Read ~/.claude/projects/ for Claude project metadata + transcripts\n\nReference snapshot reference SnapshotStore class and build_snapshot() function.\nWrite unit tests for cache TTL behavior and snapshot diffing logic.",
         "status": "closed",
         "ui_status": "done",
         "priority": 1,
@@ -1655,7 +1655,7 @@
       {
         "id": "gui-bn8.3",
         "title": "Port data models and command execution to Rust",
-        "description": "attached_molecule: gui-wisp-vs4f\nattached_formula: mol-polecat-work\nattached_at: 2026-04-22T04:55:49Z\nattached_vars: [\"base_branch=main\"]\ndispatched_by: mayor\nformula_vars: base_branch=main\n\nPort the core data layer from Python to Rust (server.py lines 1-150 approximately):\n\n1. **CommandResult struct**: ok, stdout, stderr, returncode, parsed data (serde::Deserialize)\n2. **run_command() function**: Execute `gt` CLI commands via std::process::Command\n   - Configurable timeout (default 3s) via tokio::time::timeout\n   - JSON parsing of stdout when expected\n   - Error handling matching Python's try/except pattern\n3. **Snapshot data model**: Rust structs for the full snapshot shape:\n   - WorkspaceSnapshot (town info, services, rigs, agents, metrics)\n   - RigInfo, AgentInfo, TaskInfo, ActivityGroup\n   - Metrics (total tasks, active agents, etc.)\n4. **Config constants**: GT_ROOT path, polling interval, cache timeouts\n\nReference webui/server.py for exact field names and types. All structs must derive Serialize + Deserialize for Tauri IPC.\n\nWrite unit tests for run_command with mock gt output and for struct serialization round-trips.",
+        "description": "attached_molecule: gui-wisp-vs4f\nattached_formula: mol-polecat-work\nattached_at: 2026-04-22T04:55:49Z\nattached_vars: [\"base_branch=main\"]\ndispatched_by: mayor\nformula_vars: base_branch=main\n\nPort the core data layer from retired backend to Rust (backend reference lines 1-150 approximately):\n\n1. **CommandResult struct**: ok, stdout, stderr, returncode, parsed data (serde::Deserialize)\n2. **run_command() function**: Execute `gt` CLI commands via std::process::Command\n   - Configurable timeout (default 3s) via tokio::time::timeout\n   - JSON parsing of stdout when expected\n   - Error handling matching retired backend's try/except pattern\n3. **Snapshot data model**: Rust structs for the full snapshot shape:\n   - WorkspaceSnapshot (town info, services, rigs, agents, metrics)\n   - RigInfo, AgentInfo, TaskInfo, ActivityGroup\n   - Metrics (total tasks, active agents, etc.)\n4. **Config constants**: GT_ROOT path, polling interval, cache timeouts\n\nReference snapshot reference for exact field names and types. All structs must derive Serialize + Deserialize for Tauri IPC.\n\nWrite unit tests for run_command with mock gt output and for struct serialization round-trips.",
         "status": "closed",
         "ui_status": "done",
         "priority": 1,
@@ -1681,7 +1681,7 @@
       {
         "id": "gui-bn8.2",
         "title": "Initialize Tauri project structure with Rust scaffolding",
-        "description": "attached_molecule: gui-wisp-bbxs\nattached_formula: mol-polecat-work\nattached_at: 2026-04-22T03:50:20Z\nattached_vars: [\"base_branch=main\"]\ndispatched_by: mayor\nformula_vars: base_branch=main\n\nInitialize a Tauri v2 project in the repo root:\n- Run `cargo install create-tauri-app` or manually scaffold\n- Create src-tauri/ with Cargo.toml, tauri.conf.json, main.rs, lib.rs\n- Create src/ directory for frontend files (will be populated in later tasks)\n- Configure tauri.conf.json: app name \"GTUI\", window title \"Gas Town UI\", default size 1400x900\n- Add .gitignore entries for target/, node_modules/ if any\n- Ensure `cargo build` succeeds with empty Tauri app (hello world window)\n- Tauri v2 with these Rust dependencies: serde, serde_json, tokio (full features), tauri\n\nThe frontend src/ should have a minimal index.html placeholder for now.",
+        "description": "attached_molecule: gui-wisp-bbxs\nattached_formula: mol-polecat-work\nattached_at: 2026-04-22T03:50:20Z\nattached_vars: [\"base_branch=main\"]\ndispatched_by: mayor\nformula_vars: base_branch=main\n\nInitialize a Tauri v2 project in the repo root:\n- Run `cargo install create-tauri-app` or manually scaffold\n- Create src-tauri/ with Cargo.toml, tauri.conf.json, main.rs, lib.rs\n- Create frontend/ directory for frontend files (will be populated in later tasks)\n- Configure tauri.conf.json: app name \"GTUI\", window title \"Gas Town UI\", default size 1400x900\n- Add .gitignore entries for target/, node_modules/ if any\n- Ensure `cargo build` succeeds with empty Tauri app (hello world window)\n- Tauri v2 with these Rust dependencies: serde, serde_json, tokio (full features), tauri\n\nThe frontend/ should have a minimal index.html placeholder for now.",
         "status": "closed",
         "ui_status": "done",
         "priority": 1,
@@ -1706,8 +1706,8 @@
       },
       {
         "id": "gui-bn8.1",
-        "title": "Move existing web UI to webui/ directory",
-        "description": "attached_molecule: gui-wisp-i85g\nattached_formula: mol-polecat-work\nattached_at: 2026-04-22T03:45:20Z\nattached_vars: [\"base_branch=main\"]\ndispatched_by: mayor\nformula_vars: base_branch=main\n\nMove all current GTUI source files into a webui/ subdirectory to preserve the existing web UI:\n- server.py → webui/server.py\n- index.html → webui/index.html\n- static/ → webui/static/\n- scripts/ → webui/scripts/\n\nUpdate any internal path references in server.py (static file serving paths).\nAdd a webui/README.md noting this is the legacy web UI preserved for comparison.\nVerify the web UI still works from webui/ by running: cd webui && python3 server.py\n\nDo NOT move: README.md, LICENSE, docs/, .git",
+        "title": "Move existing desktop UI to retired-dashboard/ directory",
+        "description": "attached_molecule: gui-wisp-i85g\nattached_formula: mol-polecat-work\nattached_at: 2026-04-22T03:45:20Z\nattached_vars: [\"base_branch=main\"]\ndispatched_by: mayor\nformula_vars: base_branch=main\n\nMove all current GTUI source files into a retired-dashboard/ subdirectory to preserve the existing desktop UI:\n- backend reference → snapshot reference\n- index.html → retired-dashboard/index.html\n- static/ → retired-dashboard/static/\n- scripts/ → retired-dashboard/scripts/\n\nUpdate any internal path references in backend reference (static file serving paths).\nAdd a retired-dashboard/README.md noting this is the retired desktop dashboard preserved for comparison.\nVerify the desktop UI still works from retired-dashboard/ by running: cd retired-dashboard && backend backend reference\n\nDo NOT move: README.md, LICENSE, docs/, .git",
         "status": "closed",
         "ui_status": "done",
         "priority": 1,
@@ -1733,7 +1733,7 @@
       {
         "id": "gui-bn8",
         "title": "Migrate GTUI to Tauri app (Rust backend + WebView frontend)",
-        "description": "Rewrite GTUI from a Python+vanilla-JS web dashboard into a Tauri desktop application.\n\n## Current State\n- Backend: Python 3.9+ (server.py, ~2,741 lines) — zero external deps, ThreadingHTTPServer, polls `gt` CLI for workspace state\n- Frontend: Vanilla JS SPA (app.js ~2,088 lines + 5 renderer modules ~436 lines), CSS (~1,339 lines), HTML shell (214 lines)\n- Features: real-time workspace snapshot polling, agent activity feed, task spine graph (SVG DAG), transcript viewers (Claude + Codex), Git diff viewer, intervention hooks (retry/pause/inject/write-terminal)\n- API: GET /api/snapshot, GET /api/terminal, GET /api/git/diff, POST /api/action/*\n\n## Target State\n- Tauri desktop app with Rust backend replacing Python\n- Frontend adapted for Tauri WebView (invoke IPC instead of fetch)\n- 100% feature parity with current web UI\n- Properly tested (Rust unit tests + integration tests)\n- Old web UI preserved in webui/ directory for comparison\n\n## Architecture Decisions\n- Rust backend uses Tauri commands (IPC) instead of HTTP REST\n- Port Python's subprocess gt CLI calls to Rust Command execution\n- Port threading/caching model to tokio async + Arc<Mutex>\n- Keep same frontend structure (vanilla JS, no framework migration)\n- Adapt fetch calls to window.__TAURI__.invoke\n- Keep same CSS, same renderers, same SVG graph logic\n\n## Constraints\n- Work on main branch\n- Keep old web UI operational in webui/\n- Identical functionality — no feature additions or removals\n- Must build and run on macOS (darwin/arm64)",
+        "description": "Rewrite GTUI from a Tauri desktop dashboard into a Tauri desktop application.\n\n## Current State\n- Backend: retired backend (backend reference, ~2,741 lines) — zero external deps, ThreadingHTTPServer, polls `gt` CLI for workspace state\n- Frontend: Vanilla JS SPA (app.js ~2,088 lines + 5 renderer modules ~436 lines), CSS (~1,339 lines), HTML shell (214 lines)\n- Features: real-time workspace snapshot polling, agent activity feed, task spine graph (SVG DAG), transcript viewers (Claude + Codex), Git diff viewer, intervention hooks (retry/pause/inject/write-terminal)\n- API: GET /api/snapshot, GET /api/terminal, GET /api/git/diff, POST /api/action/*\n\n## Target State\n- Tauri desktop app with Rust backend replacing retired backend\n- Frontend adapted for Tauri WebView (invoke IPC instead of fetch)\n- 100% feature parity with current desktop UI\n- Properly tested (Rust unit tests + integration tests)\n- Old desktop UI preserved in retired-dashboard/ directory for comparison\n\n## Architecture Decisions\n- Rust backend uses Tauri commands (IPC) instead of HTTP REST\n- Port retired backend's subprocess gt CLI calls to Rust Command execution\n- Port threading/caching model to tokio async + Arc<Mutex>\n- Keep same frontend structure (vanilla JS, no framework migration)\n- Adapt fetch calls to window.__TAURI__.invoke\n- Keep same CSS, same renderers, same SVG graph logic\n\n## Constraints\n- Work on main branch\n- Keep old desktop UI operational in retired-dashboard/\n- Identical functionality — no feature additions or removals\n- Must build and run on macOS (darwin/arm64)",
         "status": "closed",
         "ui_status": "done",
         "priority": 1,
@@ -3907,7 +3907,7 @@
     "groups": [
       {
         "task_id": "gui-cqe.1",
-        "title": "Capture legacy webui snapshot fixtures",
+        "title": "Capture retired desktop dashboard snapshot fixtures",
         "stored_status": "hooked",
         "ui_status": "running",
         "is_system": false,
@@ -3926,7 +3926,7 @@
             "hook": {
               "agent": "gtui/polecats/furiosa",
               "bead_id": "gui-cqe.1",
-              "title": "Capture legacy webui snapshot fixtures",
+              "title": "Capture retired desktop dashboard snapshot fixtures",
               "status": "hooked"
             },
             "events": [
@@ -4937,7 +4937,7 @@
     "convoys": [
       {
         "id": "hq-cv-yuqt0",
-        "title": "Convoy: Feature parity: port all legacy webui collectors to Tauri",
+        "title": "Convoy: Feature parity: port all retired desktop dashboard collectors to Tauri",
         "status": "open",
         "tracked_ids": [
           "external:gui:gui-cqe.1",
@@ -6420,7 +6420,7 @@
       "hook": {
         "agent": "gtui/polecats/furiosa",
         "bead_id": "gui-cqe.1",
-        "title": "Capture legacy webui snapshot fixtures",
+        "title": "Capture retired desktop dashboard snapshot fixtures",
         "status": "hooked"
       },
       "events": [

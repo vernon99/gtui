@@ -1,6 +1,3 @@
-__pycache__/
-*.py[cod]
-
 .DS_Store
 .env
 
@@ -18,9 +15,3 @@ logs/
 target/
 src-tauri/gen/
 src-tauri/target/
-
-# Node (not currently used, but reserved for future frontend tooling)
-node_modules/
-package-lock.json
-yarn.lock
-pnpm-lock.yaml

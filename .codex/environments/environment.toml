@@ -7,4 +7,14 @@ script = ""
 [[actions]]
 name = "Rebuild and Run"
 icon = "run"
-command = "./scripts/rebuild_and_run_tauri.sh"
+command = "./scripts/rebuild_and_run.sh"
+
+[[actions]]
+name = "Inspect Native"
+icon = "run"
+command = "./scripts/inspect_native.sh"
+
+[[actions]]
+name = "Dump Snapshot"
+icon = "run"
+command = "mkdir -p logs && ./scripts/dump_snapshot.sh --out logs/snapshot.json"

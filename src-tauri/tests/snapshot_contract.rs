@@ -1,14 +1,12 @@
-//! Parity assertions against the legacy `webui/server.py` snapshot fixtures
-//! captured in gui-cqe.1.
+//! Snapshot contract assertions for frontend-facing JSON fixtures.
 //!
-//! These tests pin the JSON shape and key counts that the Rust port of
-//! `build_snapshot` must eventually reproduce. They run against the captured
-//! fixtures (not against `build_snapshot`) so they pass today and will keep
-//! defending the contract as downstream collectors come online.
+//! These tests pin the JSON shape and key counts that `build_snapshot`
+//! must keep returning. They run against captured fixtures so the contract
+//! stays stable even when live workspace state changes.
 //!
-//! The goal is structural parity, not value equality — wall-clock timestamps
-//! and live workspace state drift between captures, so we assert on shape and
-//! presence rather than exact payloads.
+//! The goal is structural compatibility, not value equality: wall-clock
+//! timestamps and live workspace state drift between captures, so we assert on
+//! shape and presence rather than exact payloads.
 
 mod common;
 
@@ -17,11 +15,11 @@ use std::collections::BTreeSet;
 use common::load_fixture_json;
 use serde_json::Value;
 
-const POPULATED: &str = "webui_snapshot_populated.json";
-const EMPTY: &str = "webui_snapshot_empty.json";
+const POPULATED: &str = "snapshot_contract_populated.json";
+const EMPTY: &str = "snapshot_contract_empty.json";
 
 /// Top-level keys that `build_snapshot` returns on every frame, per the
-/// legacy webui contract documented in `WEBUI_SNAPSHOT_PARITY.md`.
+/// contract documented in `SNAPSHOT_CONTRACT.md`.
 const TOP_LEVEL_KEYS: &[&str] = &[
     "actions",
     "activity",
@@ -335,7 +333,7 @@ fn populated_fixture_crews_carry_enrichment_and_running_metadata() {
 
     // Every crew row is expected to carry merged running-state metadata
     // (branch/has_session/mail_*) alongside the enrichment fields added by
-    // `enrich_crew_workspace`. The Rust port of `merge_crews` must preserve
+    // `enrich_crew_workspace`. The Implementation of `merge_crews` must preserve
     // this contract.
     for (i, crew) in crews.iter().enumerate() {
         assert_keys_present(
@@ -427,7 +425,7 @@ fn populated_fixture_agents_carry_expected_keys() {
 }
 
 #[test]
-fn graph_node_inner_keys_match_python() {
+fn graph_node_inner_keys_match_contract() {
     let snap = load_fixture_json(POPULATED);
     let node = &snap["graph"]["nodes"][0];
     assert_keys_present(
@@ -478,7 +476,7 @@ fn graph_edge_keys_are_minimal_and_stable() {
 }
 
 #[test]
-fn activity_group_inner_keys_match_python() {
+fn activity_group_inner_keys_match_contract() {
     let snap = load_fixture_json(POPULATED);
     let group = &snap["activity"]["groups"][0];
     assert_keys_present(
@@ -573,7 +571,7 @@ fn status_legend_has_seven_entries_in_both_fixtures() {
 }
 
 #[test]
-fn status_inner_keys_match_python() {
+fn status_inner_keys_match_contract() {
     let snap = load_fixture_json(POPULATED);
     assert_keys_present(
         &snap["status"],

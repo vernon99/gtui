@@ -61,7 +61,7 @@ async fn run_command_signal_termination_reports_no_returncode() {
 
 #[tokio::test]
 async fn run_command_parse_json_empty_stdout_deserialises_as_null() {
-    // Python's behaviour: empty stdout with parse_json becomes `null`, not an
+    // the contract's behaviour: empty stdout with parse_json becomes `null`, not an
     // error. Verify the Rust port matches.
     let result = run_command(
         &["sh", "-c", "true"],

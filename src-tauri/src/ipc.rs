@@ -1,19 +1,8 @@
 //! Tauri IPC command handlers.
 //!
-//! Port of the Python `GTUIHandler` HTTP endpoints (`webui/server.py`) to
-//! typed Tauri commands. Each handler takes the shared [`SnapshotStore`] as
-//! `State` and returns `Result<T, String>` so the JS frontend sees either a
-//! decoded JSON value or a string error via `window.__TAURI__.core.invoke`.
-//!
-//! | Tauri command      | Python endpoint                  |
-//! | ------------------ | -------------------------------- |
-//! | `get_snapshot`     | `GET /api/snapshot`              |
-//! | `get_terminal`     | `GET /api/terminal?target=…`     |
-//! | `get_git_diff`     | `GET /api/git/diff?repo=…&sha=…` |
-//! | `retry_task`       | `POST /api/action/retry-task`    |
-//! | `pause_agent`      | `POST /api/action/pause-agent`   |
-//! | `inject_message`   | `POST /api/action/inject`        |
-//! | `write_terminal`   | `POST /api/action/write-terminal`|
+//! Each handler takes the shared [`SnapshotStore`] as `State` and returns
+//! `Result<T, String>` so the JS frontend sees either a decoded JSON value or
+//! a string error via `window.__TAURI__.core.invoke`.
 
 use serde_json::Value;
 use tauri::State;
@@ -21,13 +10,13 @@ use tauri::State;
 use crate::models::WorkspaceSnapshot;
 use crate::snapshot::{CachedGitDiff, SnapshotStore};
 
-/// Replaces `GET /api/snapshot`.
+/// Return the latest workspace snapshot.
 #[tauri::command]
 pub async fn get_snapshot(store: State<'_, SnapshotStore>) -> Result<WorkspaceSnapshot, String> {
     Ok(store.get())
 }
 
-/// Replaces `GET /api/terminal?target=…`.
+/// Return terminal and transcript state for one target.
 #[tauri::command]
 pub async fn get_terminal(
     store: State<'_, SnapshotStore>,
@@ -36,7 +25,7 @@ pub async fn get_terminal(
     store.get_terminal_state(&target).await
 }
 
-/// Replaces `GET /api/git/diff?repo=…&sha=…`.
+/// Return a cached or freshly computed git diff.
 #[tauri::command]
 pub async fn get_git_diff(
     store: State<'_, SnapshotStore>,
@@ -46,13 +35,13 @@ pub async fn get_git_diff(
     store.fetch_diff(&repo, &sha).await
 }
 
-/// Replaces `POST /api/action/retry-task`.
+/// Retry a task through the Gas Town CLI.
 #[tauri::command]
 pub async fn retry_task(store: State<'_, SnapshotStore>, task_id: String) -> Result<Value, String> {
     store.retry_task(&task_id).await
 }
 
-/// Replaces `POST /api/action/pause-agent`.
+/// Ask an agent to pause after its current step.
 #[tauri::command]
 pub async fn pause_agent(
     store: State<'_, SnapshotStore>,
@@ -61,7 +50,7 @@ pub async fn pause_agent(
     store.pause_agent(&agent_id).await
 }
 
-/// Replaces `POST /api/action/inject`.
+/// Send an instruction to an agent.
 #[tauri::command]
 pub async fn inject_message(
     store: State<'_, SnapshotStore>,
@@ -71,7 +60,7 @@ pub async fn inject_message(
     store.inject_instruction(&agent_id, &message).await
 }
 
-/// Replaces `POST /api/action/write-terminal`.
+/// Write text into an agent's tmux pane.
 #[tauri::command]
 pub async fn write_terminal(
     store: State<'_, SnapshotStore>,

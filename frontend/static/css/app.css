@@ -211,6 +211,11 @@
       color: #341010;
     }
 
+    .live-pill.loading {
+      background: linear-gradient(135deg, var(--ice), #dbe7ff);
+      color: #0e1d38;
+    }
+
     .pulse {
       width: 10px;
       height: 10px;
@@ -738,6 +743,48 @@
       color: var(--muted);
       text-align: center;
       background: rgba(255, 255, 255, 0.02);
+    }
+
+    .loading-state {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      min-height: 104px;
+      padding: 18px;
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .loading-spinner {
+      width: 34px;
+      height: 34px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      border: 3px solid rgba(142, 181, 255, 0.2);
+      border-top-color: var(--ice);
+      animation: spin 900ms linear infinite;
+    }
+
+    .loading-title {
+      color: var(--text);
+      font-weight: 800;
+      margin-bottom: 4px;
+    }
+
+    .loading-copy {
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .loading-empty {
+      border-color: rgba(142, 181, 255, 0.18);
+      background: rgba(142, 181, 255, 0.04);
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
     }
 
     .feed-list {

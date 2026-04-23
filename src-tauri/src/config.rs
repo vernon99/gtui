@@ -1,14 +1,13 @@
 //! Runtime configuration constants and path resolution for GTUI.
 //!
-//! Mirrors the top-of-file constants in `webui/server.py` (GT_ROOT, polling
-//! interval, cache TTLs, default command timeout). The Rust port keeps the
-//! same numeric values so polecats, witnesses, and operators observe the same
-//! cadence regardless of which backend is driving the UI.
+//! These constants define the snapshot cadence, cache TTLs, command timeouts,
+//! and default Gas Town root used by the desktop app.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Snapshot poll cadence. The Python server refreshes once every 2 seconds.
+/// Snapshot poll cadence.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(2_000);
 
 /// Default per-command timeout for `run_command`. Individual call sites may
@@ -47,12 +46,66 @@ pub fn default_gt_root() -> PathBuf {
     PathBuf::from("gt")
 }
 
+/// Ensure GUI launches can still find tools installed by the user's shell.
+///
+/// LaunchServices does not reliably preserve the interactive shell `PATH`, so
+/// app-bundle launches may otherwise fail to find `gt`, `bd`, `tmux`, or
+/// Homebrew tools even though they work in a terminal.
+pub fn install_default_tool_path() {
+    let additions = default_tool_path_entries(std::env::var_os("HOME"));
+    let merged = merge_path_entries(std::env::var_os("PATH"), &additions);
+    // SAFETY: this runs once during process startup before background worker
+    // tasks are spawned.
+    unsafe {
+        std::env::set_var("PATH", merged);
+    }
+}
+
+pub fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.as_str(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn default_tool_path_entries(home: Option<OsString>) -> Vec<PathBuf> {
+    let mut entries = Vec::new();
+    if let Some(home) = home {
+        let home = PathBuf::from(home);
+        entries.push(home.join(".local/bin"));
+        entries.push(home.join(".cargo/bin"));
+    }
+    entries.push(PathBuf::from("/opt/homebrew/bin"));
+    entries.push(PathBuf::from("/opt/homebrew/sbin"));
+    entries.push(PathBuf::from("/usr/local/bin"));
+    entries
+}
+
+fn merge_path_entries(existing: Option<OsString>, additions: &[PathBuf]) -> OsString {
+    let mut paths: Vec<PathBuf> = existing
+        .as_ref()
+        .map(|value| std::env::split_paths(value).collect())
+        .unwrap_or_default();
+
+    for entry in additions.iter().rev() {
+        if !paths.iter().any(|path| path == entry) {
+            paths.insert(0, entry.clone());
+        }
+    }
+
+    std::env::join_paths(paths).unwrap_or_else(|_| existing.unwrap_or_default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn constants_match_python_defaults() {
+    fn constants_match_runtime_defaults() {
         assert_eq!(POLL_INTERVAL, Duration::from_secs(2));
         assert_eq!(DEFAULT_COMMAND_TIMEOUT, Duration::from_secs(3));
         assert_eq!(CODEX_ROLLOUT_LIST_TTL, Duration::from_secs(3));
@@ -78,5 +131,26 @@ mod tests {
                 None => std::env::remove_var("GT_ROOT"),
             }
         }
+    }
+
+    #[test]
+    fn merge_path_entries_prepends_missing_tool_dirs_without_duplicates() {
+        let home = OsString::from("/Users/example");
+        let additions = default_tool_path_entries(Some(home));
+        let existing = OsString::from("/usr/bin:/Users/example/.local/bin:/bin");
+        let merged = merge_path_entries(Some(existing), &additions);
+        let paths: Vec<PathBuf> = std::env::split_paths(&merged).collect();
+
+        assert_eq!(paths[0], PathBuf::from("/Users/example/.cargo/bin"));
+        assert_eq!(paths[1], PathBuf::from("/opt/homebrew/bin"));
+        assert_eq!(paths[2], PathBuf::from("/opt/homebrew/sbin"));
+        assert_eq!(paths[3], PathBuf::from("/usr/local/bin"));
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|path| path == &&PathBuf::from("/Users/example/.local/bin"))
+                .count(),
+            1
+        );
     }
 }
