@@ -406,6 +406,7 @@
       flex-wrap: nowrap;
       min-width: 0;
       overflow-x: auto;
+      overflow-y: hidden;
       padding: 0 1px;
       border-bottom: 1px solid rgba(230, 225, 211, 0.13);
     }
