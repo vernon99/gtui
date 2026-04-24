@@ -6,6 +6,8 @@
 //! bead, git, convoy, graph, and activity sections inline.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+#[cfg(target_os = "macos")]
+use std::fs;
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -38,6 +40,11 @@ pub const ACTION_HISTORY_LIMIT: usize = 24;
 
 /// Number of actions surfaced on each snapshot.
 pub const SNAPSHOT_ACTION_LIMIT: usize = 12;
+
+#[cfg(target_os = "macos")]
+const GTUI_START_LAUNCH_AGENT_LABEL: &str = "com.gastown.gtui.start";
+#[cfg(target_os = "macos")]
+const GTUI_START_LAUNCH_AGENT_PLIST: &str = "com.gastown.gtui.start.plist";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TerminalSendMode {
@@ -661,10 +668,17 @@ impl SnapshotStore {
         Ok(action)
     }
 
-    /// Bring up the full Gas Town runtime using the same CLI path a human
-    /// would use at the terminal. `gt up --restore` is idempotent and restores
-    /// crew / pinned polecat state in addition to core services.
+    /// Bring up the full Gas Town runtime. On macOS, hand startup to a
+    /// one-shot LaunchAgent so GTUI does not remain the responsible app for
+    /// later daemon-owned agent work.
     pub async fn run_gt(&self) -> Result<Value, String> {
+        #[cfg(target_os = "macos")]
+        {
+            if self.inner.gt_root.exists() {
+                return self.run_gt_via_launchd().await;
+            }
+        }
+
         self.run_gt_control(
             "run-gt",
             &["gt", "up", "--restore", "--quiet"],
@@ -1271,6 +1285,176 @@ impl SnapshotStore {
         let _ = self.refresh_once().await;
         Ok(action)
     }
+
+    #[cfg(target_os = "macos")]
+    async fn run_gt_via_launchd(&self) -> Result<Value, String> {
+        let plist_path = match write_start_launch_agent(&self.inner.gt_root) {
+            Ok(path) => path,
+            Err(err) => {
+                let command = format!("launchctl load {}", GTUI_START_LAUNCH_AGENT_PLIST);
+                let action = json!({
+                    "kind": "run-gt",
+                    "command": command,
+                    "ok": false,
+                    "output": err,
+                    "timestamp": now_iso(),
+                });
+                self.record_action(action.clone());
+                return Ok(action);
+            }
+        };
+        let plist = plist_path.to_string_lossy().into_owned();
+
+        // Best effort: clear a previous one-shot job instance before loading
+        // the freshly rendered plist.
+        let _ = run_command(
+            &["launchctl", "unload", plist.as_str()],
+            &self.inner.gt_root,
+            RunOptions::default().with_timeout(Duration::from_secs(5)),
+        )
+        .await;
+
+        let command = ["launchctl", "load", plist.as_str()];
+        let result = run_command(
+            &command,
+            &self.inner.gt_root,
+            RunOptions::default().with_timeout(Duration::from_secs(8)),
+        )
+        .await;
+        let output = if result.ok {
+            "GT startup handed to launchd.".to_string()
+        } else {
+            action_output(&result)
+        };
+        let action = json!({
+            "kind": "run-gt",
+            "command": display_command(&command),
+            "ok": result.ok,
+            "output": output,
+            "timestamp": now_iso(),
+        });
+        self.record_action(action.clone());
+        if result.ok {
+            self.invalidate_io_cache();
+            self.invalidate_terminal_cache(None);
+        }
+        let _ = self.refresh_once().await;
+        Ok(action)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn write_start_launch_agent(gt_root: &Path) -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| "HOME is not set; cannot install GT startup LaunchAgent.".to_string())?;
+    let agents_dir = home.join("Library").join("LaunchAgents");
+    fs::create_dir_all(&agents_dir)
+        .map_err(|err| format!("creating LaunchAgents directory: {err}"))?;
+
+    let log_dir = gt_root.join("daemon");
+    fs::create_dir_all(&log_dir).map_err(|err| format!("creating daemon log directory: {err}"))?;
+
+    let plist_path = agents_dir.join(GTUI_START_LAUNCH_AGENT_PLIST);
+    let gt_path = resolve_gt_executable();
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    let log_path = log_dir.join("gtui-start.log");
+    let plist = render_start_launch_agent_plist(&gt_path, gt_root, &path_env, &log_path);
+
+    fs::write(&plist_path, plist).map_err(|err| format!("writing LaunchAgent plist: {err}"))?;
+    Ok(plist_path)
+}
+
+#[cfg(target_os = "macos")]
+fn render_start_launch_agent_plist(
+    gt_path: &str,
+    gt_root: &Path,
+    path_env: &str,
+    log_path: &Path,
+) -> String {
+    let gt_path = xml_escape(gt_path);
+    let gt_root = xml_escape(&gt_root.to_string_lossy());
+    let path_env = xml_escape(path_env);
+    let log_path = xml_escape(&log_path.to_string_lossy());
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{GTUI_START_LAUNCH_AGENT_LABEL}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{gt_path}</string>
+        <string>up</string>
+        <string>--restore</string>
+        <string>--quiet</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{gt_root}</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>AbandonProcessGroup</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>{log_path}</string>
+
+    <key>StandardErrorPath</key>
+    <string>{log_path}</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>GT_TOWN_ROOT</key>
+        <string>{gt_root}</string>
+        <key>GT_ROOT</key>
+        <string>{gt_root}</string>
+        <key>PATH</key>
+        <string>{path_env}</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
+"#
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_gt_executable() -> String {
+    find_executable_in_path("gt")
+        .unwrap_or_else(|| PathBuf::from("gt"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[cfg(target_os = "macos")]
+fn find_executable_in_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+#[cfg(target_os = "macos")]
+fn xml_escape(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 /// Return the last `n` entries of a slice, matching snapshot contract's `xs[-n:]`.
@@ -4335,6 +4519,27 @@ mod tests {
 
     fn tmp_root() -> PathBuf {
         std::env::temp_dir()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn start_launch_agent_plist_runs_gt_up_restore() {
+        let plist = render_start_launch_agent_plist(
+            "/tmp/bin/gt",
+            Path::new("/tmp/Gas & Town"),
+            "/tmp/bin:/usr/bin",
+            Path::new("/tmp/Gas & Town/daemon/gtui-start.log"),
+        );
+
+        assert!(plist.contains("<string>com.gastown.gtui.start</string>"));
+        assert!(plist.contains("<string>/tmp/bin/gt</string>"));
+        assert!(plist.contains("<string>up</string>"));
+        assert!(plist.contains("<string>--restore</string>"));
+        assert!(plist.contains("<string>--quiet</string>"));
+        assert!(plist.contains("<key>AbandonProcessGroup</key>"));
+        assert!(plist.contains("<key>GT_ROOT</key>"));
+        assert!(plist.contains("<string>/tmp/Gas &amp; Town</string>"));
+        assert!(plist.contains("<string>/tmp/Gas &amp; Town/daemon/gtui-start.log</string>"));
     }
 
     #[test]
