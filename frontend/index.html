@@ -22,9 +22,11 @@
       <div class="panel-head">
         <h2>Gas Town Control Surface</h2>
         <div class="toolbar control-surface-toolbar">
-          <div class="live-pill" id="live-pill">
+          <button id="gt-control-button" type="button" hidden>Run GT</button>
+          <div class="live-pill" id="live-pill" tabindex="0" aria-describedby="live-pill-tooltip">
             <span class="pulse"></span>
             <span id="live-label">Booting</span>
+            <div class="pill-tooltip" id="live-pill-tooltip" role="tooltip"></div>
           </div>
           <label class="filter-group" for="scope-select">
             <span>Rig</span>

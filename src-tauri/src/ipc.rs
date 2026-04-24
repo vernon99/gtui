@@ -35,6 +35,18 @@ pub async fn get_git_diff(
     store.fetch_diff(&repo, &sha).await
 }
 
+/// Bring up the Gas Town runtime.
+#[tauri::command]
+pub async fn run_gt(store: State<'_, SnapshotStore>) -> Result<Value, String> {
+    store.run_gt().await
+}
+
+/// Pause the Gas Town runtime.
+#[tauri::command]
+pub async fn stop_gt(store: State<'_, SnapshotStore>) -> Result<Value, String> {
+    store.stop_gt().await
+}
+
 /// Retry a task through the Gas Town CLI.
 #[tauri::command]
 pub async fn retry_task(store: State<'_, SnapshotStore>, task_id: String) -> Result<Value, String> {
@@ -79,6 +91,10 @@ mod tests {
 
     fn tmp_root() -> PathBuf {
         std::env::temp_dir()
+    }
+
+    fn missing_root() -> PathBuf {
+        std::env::temp_dir().join("gtui-ipc-missing-root")
     }
 
     #[tokio::test]
@@ -129,6 +145,41 @@ mod tests {
             !err.contains("Unknown repo id"),
             "expected a git failure, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn run_gt_records_control_action() {
+        let store = SnapshotStore::new(missing_root());
+        let action = store.run_gt().await.expect("run_gt returns action payload");
+        assert_eq!(action["kind"], "run-gt");
+        assert!(
+            action["command"]
+                .as_str()
+                .unwrap_or("")
+                .contains("gt up --restore --quiet"),
+            "got: {}",
+            action["command"]
+        );
+        assert!(action.get("ok").is_some());
+    }
+
+    #[tokio::test]
+    async fn stop_gt_records_control_action() {
+        let store = SnapshotStore::new(missing_root());
+        let action = store
+            .stop_gt()
+            .await
+            .expect("stop_gt returns action payload");
+        assert_eq!(action["kind"], "stop-gt");
+        assert!(
+            action["command"]
+                .as_str()
+                .unwrap_or("")
+                .contains("gt down --polecats --quiet"),
+            "got: {}",
+            action["command"]
+        );
+        assert!(action.get("ok").is_some());
     }
 
     #[tokio::test]
@@ -288,6 +339,8 @@ mod tests {
             get_snapshot,
             get_terminal,
             get_git_diff,
+            run_gt,
+            stop_gt,
             retry_task,
             pause_agent,
             inject_message,

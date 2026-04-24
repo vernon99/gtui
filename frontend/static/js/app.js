@@ -1,5 +1,11 @@
 import { esc } from "./renderers/html.js";
 import { hiddenCompletedTaskIdsFromSnapshot } from "./convoys.mjs";
+import { describeSnapshotHealth } from "./health.mjs";
+import {
+  findSnapshotPrimaryTerminalAgent,
+  resolvePrimaryTerminalAgent,
+  snapshotPrimaryTerminalIsDegraded,
+} from "./primary-terminal.mjs";
 import {
   getTranscriptView,
   hasTranscriptItems,
@@ -29,6 +35,7 @@ import {
       primaryTerminalFetchStartedAt: 0,
       primaryTerminalDataKey: "",
       primaryTerminalRenderedKey: "",
+      lastPrimaryTerminalAgent: null,
       primaryLogPinnedBottom: true,
       primaryLogScrollTop: 0,
       tmuxLogScrollStates: new Map(),
@@ -53,6 +60,8 @@ import {
       hideCompletedConvoys: true,
       primaryInjectDraft: "",
       primarySending: false,
+      gtControlInFlight: false,
+      gtControlAction: "",
       bootStartedMs: Date.now(),
       lastSuccessMs: 0,
       inFlight: false,
@@ -345,8 +354,12 @@ import {
     }
 
     function getPrimaryTerminalAgent() {
-      const agents = app.snapshot?.agents || [];
-      return agents.find((agent) => agent.role === "mayor" || agent.target === "mayor") || null;
+      const snapshotAgent = findSnapshotPrimaryTerminalAgent(app.snapshot);
+      if (snapshotAgent) {
+        app.lastPrimaryTerminalAgent = snapshotAgent;
+        return snapshotAgent;
+      }
+      return resolvePrimaryTerminalAgent(app.snapshot, app.lastPrimaryTerminalAgent);
     }
 
     function getPrimaryTerminalViewAgent() {
@@ -658,13 +671,23 @@ import {
         doltDown ? "dolt stopped" : "",
         tmuxDown ? "tmux stopped" : "",
       ].filter(Boolean);
+      const snapshotIsDegraded = snapshotPrimaryTerminalIsDegraded(app.snapshot);
+      const snapshotAgent = findSnapshotPrimaryTerminalAgent(app.snapshot);
+      const usingCachedPrimaryAgent = Boolean(targetAgent && !snapshotAgent);
+      const fallbackNote = usingCachedPrimaryAgent
+        ? "showing last known controller state while the snapshot is degraded"
+        : "";
 
       if (!targetAgent) {
         app.primaryTerminalRenderedKey = `none::${scopeLabel}::${serviceNotes.join("|")}`;
-        summaryHost.textContent = `${scopeLabel} · no controller terminal visible${serviceNotes.length ? ` · ${serviceNotes.join(" · ")}` : ""}`;
+        summaryHost.textContent = snapshotIsDegraded
+          ? `${scopeLabel} · controller terminal temporarily unavailable while the snapshot is degraded${serviceNotes.length ? ` · ${serviceNotes.join(" · ")}` : ""}`
+          : `${scopeLabel} · no controller terminal visible${serviceNotes.length ? ` · ${serviceNotes.join(" · ")}` : ""}`;
         host.innerHTML = `
           <div class="empty">
-            No primary controller terminal is visible for the current scope.
+            ${snapshotIsDegraded
+              ? "Primary controller state is temporarily unavailable while GT data is degraded."
+              : "No primary controller terminal is visible for the current scope."}
             ${tmuxDown ? ` GT tmux is currently stopped, so live pane capture is unavailable.` : ""}
           </div>
         `;
@@ -673,7 +696,7 @@ import {
 
       if (!agent) {
         app.primaryTerminalRenderedKey = `loading::${targetAgent.target || ""}::${scopeLabel}::${serviceNotes.join("|")}`;
-        summaryHost.textContent = `${targetAgent.target} · ${targetAgent.role} · loading terminal state · ${scopeLabel}${serviceNotes.length ? ` · ${serviceNotes.join(" · ")}` : ""}`;
+        summaryHost.textContent = `${targetAgent.target} · ${targetAgent.role} · loading terminal state · ${scopeLabel}${serviceNotes.length ? ` · ${serviceNotes.join(" · ")}` : ""}${fallbackNote ? ` · ${fallbackNote}` : ""}`;
         host.innerHTML = `
           <div class="empty">
             Loading primary terminal state for ${esc(targetAgent.target)}.
@@ -731,7 +754,7 @@ import {
         : "";
       app.primaryTerminalRenderedKey = buildPrimaryTerminalDataKey(agent);
 
-      summaryHost.textContent = `${agent.target} · ${agent.role} · ${usesTranscript ? transcriptLabel(transcriptView) : "terminal"} · ${scopeLabel}${serviceNotes.length ? ` · ${serviceNotes.join(" · ")}` : ""}`;
+      summaryHost.textContent = `${agent.target} · ${agent.role} · ${usesTranscript ? transcriptLabel(transcriptView) : "terminal"} · ${scopeLabel}${serviceNotes.length ? ` · ${serviceNotes.join(" · ")}` : ""}${fallbackNote ? ` · ${fallbackNote}` : ""}`;
       host.innerHTML = `
         <div class="terminal-shell">
           <div class="card">
@@ -1656,27 +1679,70 @@ returncode: ${esc(error.returncode ?? "")}</pre>
         `Polling every second · gt ${snapshot.timings?.gt_commands_ms || 0} ms · agents ${snapshot.timings?.agent_commands_ms || 0} ms · bd ${snapshot.timings?.bd_commands_ms || 0} ms · git ${snapshot.timings?.git_commands_ms || 0} ms`;
     }
 
-    function updateLivePill(snapshot) {
+    function getSnapshotHealth(snapshot) {
+      return describeSnapshotHealth(snapshot, { loading: !app.lastSuccessMs });
+    }
+
+    function updateLivePill(snapshot, health = getSnapshotHealth(snapshot)) {
       const pill = document.getElementById("live-pill");
       const label = document.getElementById("live-label");
-      pill.classList.remove("stale", "error", "loading");
-      const age = app.lastSuccessMs ? Math.floor((Date.now() - app.lastSuccessMs) / 1000) : 0;
-      if (!app.lastSuccessMs) {
+      const tooltip = document.getElementById("live-pill-tooltip");
+      pill.classList.remove("stale", "error", "loading", "stopped");
+      const details = [...health.details];
+      if (snapshot?.generated_at) {
+        details.push(`Observed: ${formatTime(snapshot.generated_at)} (${timeAgo(snapshot.generated_at)})`);
+      }
+      tooltip.innerHTML = details
+        .map((detail) => `<div class="pill-tooltip-row">${esc(detail)}</div>`)
+        .join("");
+      pill.removeAttribute("title");
+      pill.setAttribute("aria-label", `${health.label}. ${details.join(" ")}`.trim());
+      if (health.tone === "loading") {
         pill.classList.add("loading");
-        label.textContent = `Loading · ${loadingAgeSeconds()}s`;
+        label.textContent = health.label;
         return;
       }
-      if ((snapshot.errors?.length || 0) > 0) {
+      if (health.tone === "error") {
         pill.classList.add("error");
-        label.textContent = `Degraded · ${age}s`;
+        label.textContent = health.label;
         return;
       }
-      if (age >= 3) {
-        pill.classList.add("stale");
-        label.textContent = `Stale · ${age}s`;
+      if (health.tone === "stopped") {
+        pill.classList.add("stopped");
+        label.textContent = health.label;
         return;
       }
-      label.textContent = `Live · ${age}s`;
+      label.textContent = health.label;
+    }
+
+    function updateGtControlButton(snapshot, health = getSnapshotHealth(snapshot)) {
+      const button = document.getElementById("gt-control-button");
+      const action = app.gtControlInFlight
+        ? (app.gtControlAction || health.controlAction || "run")
+        : (health.controlAction || "run");
+      button.hidden = false;
+      button.dataset.gtControl = action;
+      button.classList.remove("run", "stop", "busy");
+      button.classList.add(action === "stop" ? "stop" : "run");
+      if (app.gtControlInFlight) {
+        button.classList.add("busy");
+        button.disabled = true;
+        button.textContent = action === "stop" ? "Stopping…" : "Starting…";
+        button.setAttribute("aria-label", button.textContent);
+        return;
+      }
+      button.disabled = health.tone === "loading";
+      button.textContent = health.tone === "loading" ? "Waiting…" : (health.controlLabel || "Run GT");
+      button.setAttribute(
+        "aria-label",
+        health.tone === "loading" ? "Waiting for GT status." : (health.controlLabel || "Run GT"),
+      );
+    }
+
+    function updateControlSurfaceState(snapshot) {
+      const health = getSnapshotHealth(snapshot);
+      updateGtControlButton(snapshot, health);
+      updateLivePill(snapshot, health);
     }
 
     function renderLoadingState(snapshot = null) {
@@ -1716,7 +1782,7 @@ returncode: ${esc(error.returncode ?? "")}</pre>
       document.getElementById("raw-vitals").textContent = "Waiting for gt vitals output...";
       renderActions(snapshot?.actions || []);
       renderErrors([]);
-      updateLivePill(snapshot || {});
+      updateControlSurfaceState(snapshot || {});
     }
 
     function renderAll() {
@@ -1735,7 +1801,7 @@ returncode: ${esc(error.returncode ?? "")}</pre>
       renderOverview(app.snapshot);
       renderActions(app.snapshot.actions || []);
       renderErrors(app.snapshot.errors || []);
-      updateLivePill(app.snapshot);
+      updateControlSurfaceState(app.snapshot);
     }
 
     function showToast(message, ok = true) {
@@ -1754,6 +1820,10 @@ returncode: ${esc(error.returncode ?? "")}</pre>
       document.getElementById("refresh-button").disabled = true;
       try {
         const data = await invoke("get_snapshot");
+        const snapshotAgent = findSnapshotPrimaryTerminalAgent(data);
+        if (snapshotAgent) {
+          app.lastPrimaryTerminalAgent = snapshotAgent;
+        }
         if (!hasCollectedSnapshot(data) && !app.lastSuccessMs) {
           app.snapshot = data;
           renderLoadingState(data);
@@ -1765,14 +1835,20 @@ returncode: ${esc(error.returncode ?? "")}</pre>
         if (force || changed) {
           renderAll();
         } else {
-          updateLivePill(app.snapshot);
+          updateControlSurfaceState(app.snapshot);
         }
       } catch (error) {
         if (!app.lastSuccessMs) {
           renderLoadingState(app.snapshot);
           document.getElementById("snapshot-stamp").textContent = `Snapshot request failed · ${String(error)}`;
         }
-        updateLivePill({ errors: [{ error: String(error) }] });
+        const fallbackState = app.snapshot
+          ? {
+              ...app.snapshot,
+              errors: [...(app.snapshot.errors || []), { error: String(error) }],
+            }
+          : { errors: [{ error: String(error) }] };
+        updateControlSurfaceState(fallbackState);
       } finally {
         app.inFlight = false;
         document.getElementById("refresh-button").disabled = false;
@@ -1781,15 +1857,19 @@ returncode: ${esc(error.returncode ?? "")}</pre>
 
     async function fetchPrimaryTerminal(force = false) {
       if (!app.lastSuccessMs) return;
-      const agent = getPrimaryTerminalAgent();
-      if (!agent) {
-        app.primaryTerminal = null;
-        app.primaryTerminalDataKey = "none";
+      const snapshotAgent = findSnapshotPrimaryTerminalAgent(app.snapshot);
+      if (!snapshotAgent) {
+        if (!snapshotPrimaryTerminalIsDegraded(app.snapshot)) {
+          app.primaryTerminal = null;
+          app.primaryTerminalDataKey = "none";
+          app.lastPrimaryTerminalAgent = null;
+        }
         if (!shouldFreezePrimaryTerminal()) {
           renderPrimaryTerminal();
         }
         return;
       }
+      app.lastPrimaryTerminalAgent = snapshotAgent;
       if (app.primaryTerminalInFlight) {
         const stuck = (Date.now() - app.primaryTerminalFetchStartedAt) >= PRIMARY_TERMINAL_FETCH_TIMEOUT_MS;
         if (!force && !stuck) return;
@@ -1799,7 +1879,7 @@ returncode: ${esc(error.returncode ?? "")}</pre>
       app.primaryTerminalInFlight = true;
       app.primaryTerminalFetchStartedAt = Date.now();
       try {
-        const data = await invoke("get_terminal", { target: agent.target });
+        const data = await invoke("get_terminal", { target: snapshotAgent.target });
         if (requestId !== app.primaryTerminalRequestId) return;
         app.primaryTerminal = data;
         app.primaryTerminalDataKey = buildPrimaryTerminalDataKey(getPrimaryTerminalViewAgent());
@@ -1820,13 +1900,33 @@ returncode: ${esc(error.returncode ?? "")}</pre>
       const refresh = options.refresh !== false;
       const showSuccessToast = options.successToast !== false;
       const data = await invoke(command, args);
+      const ok = data?.ok !== false;
       if (showSuccessToast) {
-        showToast(data.output || `${data.kind} sent`, true);
+        showToast(data.output || `${data.kind} sent`, ok);
       }
       if (refresh) {
         await fetchSnapshot(true);
       }
       return data;
+    }
+
+    async function runGtControl(action) {
+      if (app.gtControlInFlight) return;
+      app.gtControlInFlight = true;
+      app.gtControlAction = action === "stop" ? "stop" : "run";
+      updateGtControlButton(app.snapshot || {});
+      try {
+        await postAction(action === "stop" ? "stop_gt" : "run_gt", {}, { refresh: false });
+        await fetchSnapshot(true);
+        window.setTimeout(() => fetchSnapshot(true), 1200);
+        window.setTimeout(() => fetchSnapshot(true), 3200);
+      } catch (error) {
+        showToast(String(error), false);
+      } finally {
+        app.gtControlInFlight = false;
+        app.gtControlAction = "";
+        updateGtControlButton(app.snapshot || {});
+      }
     }
 
     async function loadDiff(repoId, sha) {
@@ -1847,6 +1947,10 @@ returncode: ${esc(error.returncode ?? "")}</pre>
     }
 
     document.getElementById("refresh-button").addEventListener("click", () => fetchSnapshot(true));
+    document.getElementById("gt-control-button").addEventListener("click", async (event) => {
+      const action = event.currentTarget?.dataset.gtControl || "run";
+      await runGtControl(action);
+    });
     document.getElementById("scope-select").addEventListener("change", (event) => {
       app.selectedScope = event.target.value;
       ensureSelection();

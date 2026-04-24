@@ -39,6 +39,8 @@ pub fn run() {
             ipc::get_snapshot,
             ipc::get_terminal,
             ipc::get_git_diff,
+            ipc::run_gt,
+            ipc::stop_gt,
             ipc::retry_task,
             ipc::pause_agent,
             ipc::inject_message,

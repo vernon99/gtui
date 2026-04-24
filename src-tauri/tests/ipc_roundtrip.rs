@@ -4,7 +4,7 @@
 //! tests instead build a mock Tauri app, register the real `invoke_handler`,
 //! and dispatch JSON payloads through `get_ipc_response`. That path covers:
 //!
-//! * Command registration (all seven handlers reachable by name)
+//! * Command registration (all nine handlers reachable by name)
 //! * Argument-name wire format (JS `taskId` deserialises to Rust `task_id`)
 //! * The `Result<T, String>` <-> IPC `Ok`/`Err` envelope
 //! * Managed `SnapshotStore` state retrieval
@@ -23,7 +23,9 @@ use tauri::webview::InvokeRequest;
 use tauri::{App, WebviewUrl, WebviewWindowBuilder};
 
 fn isolated_root() -> PathBuf {
-    std::env::temp_dir().join("gtui-ipc-roundtrip")
+    std::env::temp_dir()
+        .join("gtui-ipc-roundtrip")
+        .join("missing-root")
 }
 
 fn build_app(store: SnapshotStore) -> App<tauri::test::MockRuntime> {
@@ -33,6 +35,8 @@ fn build_app(store: SnapshotStore) -> App<tauri::test::MockRuntime> {
             gtui_lib::ipc::get_snapshot,
             gtui_lib::ipc::get_terminal,
             gtui_lib::ipc::get_git_diff,
+            gtui_lib::ipc::run_gt,
+            gtui_lib::ipc::stop_gt,
             gtui_lib::ipc::retry_task,
             gtui_lib::ipc::pause_agent,
             gtui_lib::ipc::inject_message,
@@ -124,6 +128,42 @@ fn get_git_diff_errors_on_unknown_repo() {
     assert!(
         err.as_str().unwrap_or("").contains("Unknown repo id"),
         "got: {err}"
+    );
+}
+
+#[test]
+fn run_gt_routes_over_ipc() {
+    let store = SnapshotStore::new(isolated_root());
+    let app = build_app(store);
+    let webview = new_webview(&app);
+
+    let value = invoke_json(&webview, "run_gt", json!({})).expect("run_gt returns action");
+    assert_eq!(value["kind"], "run-gt");
+    assert!(
+        value["command"]
+            .as_str()
+            .unwrap_or("")
+            .contains("gt up --restore --quiet"),
+        "got: {}",
+        value["command"]
+    );
+}
+
+#[test]
+fn stop_gt_routes_over_ipc() {
+    let store = SnapshotStore::new(isolated_root());
+    let app = build_app(store);
+    let webview = new_webview(&app);
+
+    let value = invoke_json(&webview, "stop_gt", json!({})).expect("stop_gt returns action");
+    assert_eq!(value["kind"], "stop-gt");
+    assert!(
+        value["command"]
+            .as_str()
+            .unwrap_or("")
+            .contains("gt down --polecats --quiet"),
+        "got: {}",
+        value["command"]
     );
 }
 

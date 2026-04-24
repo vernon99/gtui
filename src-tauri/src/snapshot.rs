@@ -19,7 +19,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use crate::command::{display_command, run_command, RunOptions};
-use crate::config::POLL_INTERVAL;
+use crate::config::{GT_STATUS_TIMEOUT, POLL_INTERVAL};
 use crate::models::{
     default_status_legend, Activity, ActivityGroup, AgentInfo, Metrics, StatusSummary, Timings,
     WorkspaceSnapshot,
@@ -558,6 +558,32 @@ impl SnapshotStore {
         Ok(action)
     }
 
+    /// Bring up the full Gas Town runtime using the same CLI path a human
+    /// would use at the terminal. `gt up --restore` is idempotent and restores
+    /// crew / pinned polecat state in addition to core services.
+    pub async fn run_gt(&self) -> Result<Value, String> {
+        self.run_gt_control(
+            "run-gt",
+            &["gt", "up", "--restore", "--quiet"],
+            "GT startup requested.",
+            Duration::from_secs(45),
+        )
+        .await
+    }
+
+    /// Pause the Gas Town runtime without destructive cleanup. We stop
+    /// polecats too so the UI-driven "Stop GT" control maps to the full live
+    /// runtime rather than only the background infrastructure.
+    pub async fn stop_gt(&self) -> Result<Value, String> {
+        self.run_gt_control(
+            "stop-gt",
+            &["gt", "down", "--polecats", "--quiet"],
+            "GT shutdown requested.",
+            Duration::from_secs(45),
+        )
+        .await
+    }
+
     /// Implementation of `SnapshotStore.get_terminal_state`. Performs a live tmux
     /// rediscovery merge, picks Codex or Claude transcripts when available, and
     /// otherwise falls back to a captured pane transcript. Refreshes events
@@ -1024,6 +1050,41 @@ impl SnapshotStore {
         self.record_action(action.clone());
         Ok(action)
     }
+
+    async fn run_gt_control(
+        &self,
+        kind: &str,
+        command: &[&str],
+        success_output: &str,
+        timeout: Duration,
+    ) -> Result<Value, String> {
+        let result = run_command(
+            command,
+            &self.inner.gt_root,
+            RunOptions::default().with_timeout(timeout),
+        )
+        .await;
+        let output = if result.ok {
+            let text = action_output(&result);
+            if text.trim().is_empty() {
+                success_output.to_string()
+            } else {
+                text
+            }
+        } else {
+            action_output(&result)
+        };
+        let action = json!({
+            "kind": kind,
+            "command": display_command(command),
+            "ok": result.ok,
+            "output": output,
+            "timestamp": now_iso(),
+        });
+        self.record_action(action.clone());
+        let _ = self.refresh_once().await;
+        Ok(action)
+    }
 }
 
 /// Return the last `n` entries of a slice, matching snapshot contract's `xs[-n:]`.
@@ -1063,6 +1124,39 @@ fn tmux_collection_failed(errors: &[Value]) -> bool {
     })
 }
 
+fn convoy_collection_failed(errors: &[Value]) -> bool {
+    errors.iter().any(|error| {
+        error
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.starts_with("bd list --type=convoy"))
+    })
+}
+
+fn core_service_failure_detected(errors: &[Value]) -> bool {
+    errors.iter().any(|error| {
+        let command = error.get("command").and_then(Value::as_str).unwrap_or("");
+        let text = error.get("error").and_then(Value::as_str).unwrap_or("");
+        (command.starts_with("bd ")
+            && (text.contains("Dolt server unreachable")
+                || text.contains("Dolt server is not running")))
+            || (command.starts_with("tmux ")
+                && (text.contains("no server running")
+                    || text.contains("failed to connect to server")))
+    })
+}
+
+fn convoys_have_entries(convoys: &Value) -> bool {
+    convoys
+        .get("convoys")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+        || convoys
+            .get("task_index")
+            .and_then(Value::as_object)
+            .is_some_and(|items| !items.is_empty())
+}
+
 fn sort_agents(agents: &mut [AgentInfo]) {
     agents.sort_by(|a, b| {
         (a.scope.as_str(), a.role.as_str(), a.target.as_str()).cmp(&(
@@ -1076,6 +1170,10 @@ fn sort_agents(agents: &mut [AgentInfo]) {
 fn stabilize_snapshot(previous: &WorkspaceSnapshot, next: &mut WorkspaceSnapshot) {
     let missing_status =
         next.status.raw.trim().is_empty() && !previous.status.raw.trim().is_empty();
+    let contradictory_service_failures = core_service_failure_detected(&next.errors);
+    let preserve_convoys = convoy_collection_failed(&next.errors)
+        && convoys_have_entries(&previous.convoys)
+        && !convoys_have_entries(&next.convoys);
     let had_tmux_context = !previous.status.tmux_socket.is_empty()
         || previous.agents.iter().any(|agent| agent.kind == "tmux");
     let preserve_tmux = had_tmux_context
@@ -1083,8 +1181,12 @@ fn stabilize_snapshot(previous: &WorkspaceSnapshot, next: &mut WorkspaceSnapshot
             || (next.status.tmux_socket.is_empty() && !previous.status.tmux_socket.is_empty())
             || tmux_collection_failed(&next.errors));
 
-    if missing_status {
+    if missing_status && !contradictory_service_failures {
         next.status = previous.status.clone();
+    }
+
+    if preserve_convoys {
+        next.convoys = previous.convoys.clone();
     }
 
     if !preserve_tmux {
@@ -1156,7 +1258,11 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
     let bead_stores = discover_bead_stores(gt_root);
     let gt_commands_future = async {
         tokio::join!(
-            run_command(&["gt", "status", "--fast"], gt_root, RunOptions::default(),),
+            run_command(
+                &["gt", "status", "--fast"],
+                gt_root,
+                RunOptions::default().with_timeout(GT_STATUS_TIMEOUT),
+            ),
             run_command(&["gt", "vitals"], gt_root, RunOptions::default()),
             run_command(
                 &["gt", "crew", "list", "--all", "--json"],
@@ -5155,6 +5261,91 @@ mod tests {
         assert_eq!(nux.current_command, "claude");
         assert_eq!(nux.runtime_state, "working");
         assert_eq!(nux.polecat["name"], "nux");
+    }
+
+    #[test]
+    fn stabilize_snapshot_does_not_preserve_live_status_when_errors_show_core_services_are_down() {
+        let previous = WorkspaceSnapshot {
+            status: StatusSummary {
+                town: "gt".into(),
+                root_path: "/Users/mervinkel/gt".into(),
+                overseer: "mayor".into(),
+                services: vec![
+                    "daemon (PID 1)".into(),
+                    "dolt (PID 2, :3307, ~/gt/.dolt-data)".into(),
+                    "tmux (-L gt-sock, PID 3, 4 sessions, /tmp/tmux-501/gt-sock)".into(),
+                ],
+                tmux_socket: "gt-sock".into(),
+                raw: "Town: gt".into(),
+            },
+            ..WorkspaceSnapshot::default()
+        };
+        let mut next = WorkspaceSnapshot {
+            errors: vec![
+                json!({
+                    "command": "gt status --fast",
+                    "error": "timed out after 30.0s",
+                }),
+                json!({
+                    "command": "bd status --json",
+                    "error": "failed to open database: Dolt server unreachable at 127.0.0.1:3307",
+                }),
+            ],
+            ..WorkspaceSnapshot::default()
+        };
+
+        stabilize_snapshot(&previous, &mut next);
+
+        assert!(
+            next.status.raw.is_empty(),
+            "running status should not be preserved"
+        );
+        assert!(
+            next.status.services.is_empty(),
+            "running service lines should not be preserved"
+        );
+    }
+
+    #[test]
+    fn stabilize_snapshot_preserves_convoys_on_convoy_timeout() {
+        let previous = WorkspaceSnapshot {
+            convoys: json!({
+                "convoys": [
+                    {
+                        "id": "hq-cv-1",
+                        "status": "closed",
+                        "completed": 2,
+                        "total": 2,
+                        "tracked_ids": ["gui-cqe.1", "gui-cqe.2"],
+                    }
+                ],
+                "task_index": {
+                    "gui-cqe.1": {
+                        "total": 1,
+                        "open": 0,
+                        "closed": 1,
+                        "convoy_ids": ["hq-cv-1"],
+                        "all_closed": true,
+                    }
+                }
+            }),
+            ..WorkspaceSnapshot::default()
+        };
+        let mut next = WorkspaceSnapshot {
+            errors: vec![json!({
+                "command": "bd list --type=convoy --all --json",
+                "error": "timed out after 3.0s",
+            })],
+            convoys: json!({
+                "convoys": [],
+                "task_index": {},
+            }),
+            ..WorkspaceSnapshot::default()
+        };
+
+        stabilize_snapshot(&previous, &mut next);
+
+        assert_eq!(next.convoys, previous.convoys);
     }
 
     #[tokio::test]

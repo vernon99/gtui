@@ -33,6 +33,12 @@ if [[ -n "$FORCE_BUNDLE_REFRESH" || ! -x "$APP_BIN_PATH" || ! -f "$APP_BUNDLE_PA
   needs_bundle_refresh=1
 fi
 
+if [[ "$needs_bundle_refresh" -eq 0 ]]; then
+  if find "$ROOT/src-tauri/icons" "$ROOT/src-tauri/tauri.conf.json" -type f -newer "$APP_BUNDLE_PATH/Contents/Info.plist" | read -r; then
+    needs_bundle_refresh=1
+  fi
+fi
+
 if [[ "$needs_bundle_refresh" -eq 1 ]]; then
   echo "Rebuilding app bundle shell"
   (cd "$ROOT/src-tauri" && cargo tauri build --debug)

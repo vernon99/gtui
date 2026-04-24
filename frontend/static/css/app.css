@@ -188,6 +188,7 @@
     }
 
     .live-pill {
+      position: relative;
       display: inline-flex;
       align-items: center;
       gap: 10px;
@@ -201,11 +202,6 @@
       font-size: 0.8rem;
     }
 
-    .live-pill.stale {
-      background: linear-gradient(135deg, var(--memory), #ffe6ab);
-      color: #342309;
-    }
-
     .live-pill.error {
       background: linear-gradient(135deg, #ff7e7e, #ffc1c1);
       color: #341010;
@@ -216,12 +212,55 @@
       color: #0e1d38;
     }
 
+    .live-pill.stopped {
+      background: linear-gradient(135deg, rgba(90, 108, 116, 0.95), rgba(160, 176, 184, 0.95));
+      color: #091114;
+    }
+
     .pulse {
       width: 10px;
       height: 10px;
       border-radius: 50%;
       background: currentColor;
       animation: pulse 1.4s infinite;
+    }
+
+    .pill-tooltip {
+      position: absolute;
+      left: 0;
+      top: calc(100% + 10px);
+      z-index: 20;
+      min-width: 260px;
+      max-width: 420px;
+      display: none;
+      padding: 10px 12px;
+      border-radius: 14px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(9, 13, 14, 0.96);
+      box-shadow: var(--shadow);
+      font-family: var(--sans);
+      font-weight: 600;
+      color: var(--text);
+      text-transform: none;
+      letter-spacing: 0;
+      font-size: 0.84rem;
+      line-height: 1.45;
+      white-space: normal;
+      pointer-events: auto;
+      user-select: text;
+      cursor: text;
+    }
+
+    .live-pill:hover .pill-tooltip,
+    .live-pill:focus-visible .pill-tooltip,
+    .live-pill:focus-within .pill-tooltip {
+      display: grid;
+      gap: 6px;
+    }
+
+    .pill-tooltip-row {
+      color: var(--text);
+      user-select: text;
     }
 
     @keyframes pulse {
@@ -268,6 +307,27 @@
 
     .control-surface-toolbar {
       justify-content: flex-end;
+    }
+
+    .gt-control-button {
+      min-width: 92px;
+      font-weight: 700;
+    }
+
+    .gt-control-button.run {
+      background: rgba(96, 211, 197, 0.18);
+      border-color: rgba(96, 211, 197, 0.3);
+      color: #d7fff9;
+    }
+
+    .gt-control-button.stop {
+      background: rgba(255, 103, 103, 0.16);
+      border-color: rgba(255, 103, 103, 0.28);
+      color: #ffd8d8;
+    }
+
+    .gt-control-button.busy {
+      transform: none;
     }
 
     .control-surface-meta {

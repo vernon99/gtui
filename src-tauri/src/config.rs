@@ -14,6 +14,11 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(2_000);
 /// override this (e.g. `gt polecat list --all --json` uses 6s).
 pub const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_millis(3_000);
 
+/// `gt status --fast` can legitimately take much longer on towns with many
+/// tmux sessions because it fans out through runtime inspection for each
+/// session. Keep its timeout separate from the generic subprocess budget.
+pub const GT_STATUS_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// How long a cached Codex rollout listing remains fresh before rescan.
 pub const CODEX_ROLLOUT_LIST_TTL: Duration = Duration::from_millis(3_000);
 
@@ -108,6 +113,7 @@ mod tests {
     fn constants_match_runtime_defaults() {
         assert_eq!(POLL_INTERVAL, Duration::from_secs(2));
         assert_eq!(DEFAULT_COMMAND_TIMEOUT, Duration::from_secs(3));
+        assert_eq!(GT_STATUS_TIMEOUT, Duration::from_secs(30));
         assert_eq!(CODEX_ROLLOUT_LIST_TTL, Duration::from_secs(3));
         assert_eq!(CLAUDE_SESSION_LIST_TTL, Duration::from_secs(3));
         assert_eq!(CODEX_ROLLOUT_SCAN_LIMIT, 160);

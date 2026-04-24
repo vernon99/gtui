@@ -323,6 +323,8 @@ fn focus_controls_ipc_surface_is_registered() {
             gtui_lib::ipc::get_snapshot,
             gtui_lib::ipc::get_terminal,
             gtui_lib::ipc::get_git_diff,
+            gtui_lib::ipc::run_gt,
+            gtui_lib::ipc::stop_gt,
             gtui_lib::ipc::retry_task,
             gtui_lib::ipc::pause_agent,
             gtui_lib::ipc::inject_message,
