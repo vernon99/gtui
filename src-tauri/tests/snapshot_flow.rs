@@ -29,7 +29,6 @@ async fn build_snapshot_records_errors_when_gt_binary_missing() {
     // always-present fields and never panic on absent subcommands.
     assert!(!snapshot.generated_at.is_empty());
     assert_eq!(snapshot.gt_root, isolated_root().to_string_lossy());
-    assert_eq!(snapshot.status_legend.len(), 7);
     assert!(
         snapshot.summary.command_errors as usize == snapshot.errors.len(),
         "summary.command_errors ({}) diverged from errors.len() ({})",

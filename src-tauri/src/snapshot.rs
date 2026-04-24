@@ -23,8 +23,7 @@ use crate::config::{
     DB_BACKED_COLLECTION_TTL, GIT_MEMORY_TTL, GT_STATUS_TIMEOUT, POLL_INTERVAL, TERMINAL_STATE_TTL,
 };
 use crate::models::{
-    default_status_legend, Activity, ActivityGroup, AgentInfo, Metrics, StatusSummary, Timings,
-    WorkspaceSnapshot,
+    Activity, ActivityGroup, AgentInfo, Metrics, StatusSummary, Timings, WorkspaceSnapshot,
 };
 use crate::parse::{
     normalize_lines, normalize_path_value, now_iso, parse_feed, parse_status_summary,
@@ -159,7 +158,6 @@ impl SnapshotStore {
         let initial = WorkspaceSnapshot {
             generated_at: now_iso(),
             gt_root: gt_root.to_string_lossy().into_owned(),
-            status_legend: default_status_legend(),
             ..WorkspaceSnapshot::default()
         };
         let state = SnapshotState {
@@ -265,7 +263,7 @@ impl SnapshotStore {
                 // polling loop forever; the store is resilient to individual
                 // failed gt/bd commands via `CommandResult::ok = false`.
                 // Race the refresh against shutdown so a slow `gt polecat list`
-                // or hook fan-out can't keep the loop pinned past a shutdown
+                // or a slow DB-backed collector can't keep the loop pinned past a shutdown
                 // request.
                 let shutdown_notif = inner.shutdown.notified();
                 tokio::pin!(shutdown_notif);
@@ -605,22 +603,21 @@ impl SnapshotStore {
     }
 
     /// Implementation of `SnapshotStore.retry_task`. Uses the graph node's stored status
-    /// to pick between `gt unsling` (hooked/running) and `gt release`
+    /// to pick between `gt unsling` (hooked) and `gt release`
     /// (in_progress). Returns the recorded action payload.
     pub async fn retry_task(&self, task_id: &str) -> Result<Value, String> {
         let node = self
             .get_node(task_id)
             .ok_or_else(|| format!("Unknown task: {task_id}"))?;
         let status = node.get("status").and_then(Value::as_str).unwrap_or("");
-        let ui_status = node.get("ui_status").and_then(Value::as_str).unwrap_or("");
-        let command: Vec<String> = if status == "hooked" || ui_status == "running" {
+        let command: Vec<String> = if status == "hooked" {
             let target = node
                 .get("agent_targets")
                 .and_then(Value::as_array)
                 .and_then(|arr| arr.first())
                 .and_then(Value::as_str)
                 .ok_or_else(|| {
-                    format!("Task {task_id} is marked running but no hooked agent was found.")
+                    format!("Task {task_id} is marked hooked but no hooked agent was found.")
                 })?;
             vec![
                 "gt".into(),
@@ -638,9 +635,7 @@ impl SnapshotStore {
                 "GTUI retry requested".into(),
             ]
         } else {
-            return Err(format!(
-                "Task {task_id} is not in a retryable running state."
-            ));
+            return Err(format!("Task {task_id} is not in a retryable GT status."));
         };
 
         let result = run_command(
@@ -1394,7 +1389,7 @@ async fn build_snapshot_internal(
     //   - the 5 gt subprocesses that feed status/crews/feed
     //   - per-store `bd` fan-out (discovered synchronously from disk)
     //   - convoy list
-    // Agents, bead folding, and git memory run after because they consume
+    // Agents, bead folding, and Git history run after because they consume
     // outputs from these three branches.
     let bead_stores = discover_bead_stores(gt_root);
     let gt_commands_future = async {
@@ -1537,9 +1532,9 @@ async fn build_snapshot_internal(
     let _ = &bead_data.blocked_ids; // Exposed on future IPC surfaces.
     let _ = &bead_data.hooked_ids;
 
-    // Git memory: walk the town root + crew worktrees, fan out the four git
+    // Git history: walk the town root + crew worktrees, fan out the four git
     // commands per repo, and fold commit history + merge beads into a per-task
-    // memory index.
+    // linked-commit index.
     let (git_memory, git_errors, git_ms) = if let Some(cache) = io_cache {
         collect_git_memory_cached(gt_root, &crews, &bead_data.merge_links, cache).await
     } else {
@@ -1549,12 +1544,12 @@ async fn build_snapshot_internal(
 
     // Layer linked commits, commit nodes/edges, and the "interesting" filter
     // onto the raw bead graph. Mirrors `finalize_graph` in `the runtime contract`.
-    let graph = finalize_graph(&bead_data, &git_memory, &convoys);
+    let graph = finalize_graph(&bead_data, &git_memory);
     let repo_count = git_memory.repos.len() as u32;
 
-    // Bucket live agents by hooked bead, attach task memory links. Runs after
+    // Bucket live agents by hooked bead, attach linked commit entries. Runs after
     // `finalize_graph` because the group metadata falls back to the finalized
-    // node's `ui_status`/`is_system` flags.
+    // node's GT status / `is_system` flags.
     let graph_nodes: Vec<Value> = graph
         .get("nodes")
         .and_then(Value::as_array)
@@ -1563,66 +1558,12 @@ async fn build_snapshot_internal(
     let activity = build_activity_groups(&agents, &graph_nodes, &git_memory.task_memory);
     let task_groups_count = activity.groups.len() as u32;
 
-    // Summary counters are derived from the *finalized* graph (post-filter),
-    // matching `build_snapshot` in `the runtime contract` — so totals line up with
-    // what the UI actually renders.
-    let mut running_tasks: u32 = 0;
-    let mut stuck_tasks: u32 = 0;
-    let mut ready_tasks: u32 = 0;
-    let mut done_tasks: u32 = 0;
-    let mut ice_tasks: u32 = 0;
-    let mut system_running: u32 = 0;
-    let mut stored_status_counts: BTreeMap<String, u32> = BTreeMap::new();
-    for node in &graph_nodes {
-        if node.get("kind").and_then(Value::as_str) != Some("task") {
-            continue;
-        }
-        let is_system = node
-            .get("is_system")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let ui_status = node.get("ui_status").and_then(Value::as_str).unwrap_or("");
-        if is_system {
-            if ui_status == "running" {
-                system_running += 1;
-            }
-            continue;
-        }
-        let stored = node
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-        *stored_status_counts.entry(stored).or_insert(0) += 1;
-        match ui_status {
-            "running" => running_tasks += 1,
-            "stuck" => stuck_tasks += 1,
-            "ready" => ready_tasks += 1,
-            "done" => done_tasks += 1,
-            "ice" => ice_tasks += 1,
-            _ => {}
-        }
-    }
-    let mut derived_status_counts: BTreeMap<String, u32> = BTreeMap::new();
-    derived_status_counts.insert("running".into(), running_tasks);
-    derived_status_counts.insert("stuck".into(), stuck_tasks);
-    derived_status_counts.insert("ready".into(), ready_tasks);
-    derived_status_counts.insert("done".into(), done_tasks);
-    derived_status_counts.insert("ice".into(), ice_tasks);
-
     let git = git_memory.into_json();
 
     let active_agents = agents.iter().filter(|agent| agent.has_session).count() as u32;
-    // Alerts order mirrors snapshot contract: daemon → no-running → stuck → risky-crews.
+    // Alerts stay tied to infrastructure signals. GT task statuses remain raw
+    // data for the frontend instead of being interpreted by the backend.
     let mut alerts = derive_alerts(&status_summary);
-    if running_tasks == 0 && ready_tasks > 0 && active_agents > 0 {
-        alerts.push("Agents are alive, but no product tasks are currently running.".to_string());
-    }
-    if stuck_tasks > 0 {
-        alerts.push(format!(
-            "{stuck_tasks} task node(s) are dependency-blocked."
-        ));
-    }
     let risky_crews = crews
         .iter()
         .filter(|c| {
@@ -1638,17 +1579,10 @@ async fn build_snapshot_internal(
     }
 
     let summary = Metrics {
-        running_tasks,
-        stuck_tasks,
-        ready_tasks,
-        done_tasks,
-        system_running,
         active_agents,
         task_groups: task_groups_count,
         repos: repo_count,
         command_errors: errors.len() as u32,
-        stored_status_counts,
-        derived_status_counts,
     };
 
     let actions_for_snapshot = action_history
@@ -1663,7 +1597,6 @@ async fn build_snapshot_internal(
         gt_root: gt_root.to_string_lossy().into_owned(),
         status: status_summary,
         vitals_raw,
-        status_legend: default_status_legend(),
         summary,
         alerts,
         graph,
@@ -1893,19 +1826,16 @@ fn build_hook_index(store_snapshots: &[BeadStoreSnapshot]) -> HashMap<String, Va
     let mut issue_by_agent: HashMap<String, Value> = HashMap::new();
     for snapshot in store_snapshots {
         for issue in &snapshot.hooked {
-            let assignee = issue
-                .get("assignee")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim();
-            if assignee.is_empty() {
+            let agent = issue.get("assignee").and_then(Value::as_str).unwrap_or("");
+            if agent.is_empty() {
                 continue;
             }
-            match issue_by_agent.get(assignee) {
-                Some(existing) if !prefer_hook_candidate(existing, issue) => {}
-                _ => {
-                    issue_by_agent.insert(assignee.to_string(), issue.clone());
-                }
+            let replace = issue_by_agent
+                .get(agent)
+                .map(|existing| prefer_hook_candidate(existing, issue))
+                .unwrap_or(true);
+            if replace {
+                issue_by_agent.insert(agent.to_string(), issue.clone());
             }
         }
     }
@@ -1913,7 +1843,7 @@ fn build_hook_index(store_snapshots: &[BeadStoreSnapshot]) -> HashMap<String, Va
     issue_by_agent
         .into_iter()
         .filter_map(|(agent, issue)| {
-            hook_payload_from_issue(&agent, &issue).map(|payload| (agent, payload))
+            hook_payload_from_issue(&agent, &issue).map(|hook| (agent, hook))
         })
         .collect()
 }
@@ -1933,10 +1863,82 @@ pub struct BeadStoreSnapshot {
     pub status_error: String,
 }
 
+async fn collect_bead_store_summaries_cached(
+    stores: &[BeadStore],
+    cache: &Mutex<SnapshotIoCache>,
+) -> (Vec<Value>, Vec<BeadStoreSnapshot>, Vec<Value>, u64) {
+    let cached = {
+        let guard = cache.lock().expect("snapshot io cache lock poisoned");
+        guard
+            .bead_stores
+            .as_ref()
+            .filter(|entry| {
+                entry.stores == stores && entry.collected_at.elapsed() <= DB_BACKED_COLLECTION_TTL
+            })
+            .map(|entry| {
+                (
+                    entry.summaries.clone(),
+                    entry.snapshots.clone(),
+                    entry.errors.clone(),
+                    0,
+                )
+            })
+    };
+    if let Some(hit) = cached {
+        return hit;
+    }
+
+    let (summaries, snapshots, errors, duration_ms) = collect_bead_store_summaries(stores).await;
+    let entry = CachedBeadStoreCollection {
+        stores: stores.to_vec(),
+        collected_at: Instant::now(),
+        summaries: summaries.clone(),
+        snapshots: snapshots.clone(),
+        errors: errors.clone(),
+    };
+    cache
+        .lock()
+        .expect("snapshot io cache lock poisoned")
+        .bead_stores = Some(entry);
+    (summaries, snapshots, errors, duration_ms)
+}
+
+async fn collect_convoy_data_cached(
+    gt_root: &Path,
+    cache: &Mutex<SnapshotIoCache>,
+) -> (Value, Vec<Value>, u64) {
+    let cached = {
+        let guard = cache.lock().expect("snapshot io cache lock poisoned");
+        guard
+            .convoys
+            .as_ref()
+            .filter(|entry| {
+                entry.gt_root == gt_root && entry.collected_at.elapsed() <= DB_BACKED_COLLECTION_TTL
+            })
+            .map(|entry| (entry.convoys.clone(), entry.errors.clone(), 0))
+    };
+    if let Some(hit) = cached {
+        return hit;
+    }
+
+    let (convoys, errors, duration_ms) = collect_convoy_data(gt_root).await;
+    let entry = CachedConvoyCollection {
+        gt_root: gt_root.to_path_buf(),
+        collected_at: Instant::now(),
+        convoys: convoys.clone(),
+        errors: errors.clone(),
+    };
+    cache
+        .lock()
+        .expect("snapshot io cache lock poisoned")
+        .convoys = Some(entry);
+    (convoys, errors, duration_ms)
+}
+
 /// Implementation of the per-store loop inside `collect_bead_data` in `the runtime contract`.
 /// For each discovered store, fan out the four `bd` subprocess calls
 /// (`bd status --json`, `bd list --all --json --limit 300`, `bd blocked
-/// --json`, `bd list --status=hooked --json`) and produce the `store_summaries`
+/// --json`, `bd list --status=hooked --json --limit 0`) and produce the `store_summaries`
 /// entry the snapshot's `stores` field exposes.
 ///
 /// Returns `(store_summaries, raw_snapshots, errors, duration_ms)`. The raw
@@ -2180,39 +2182,6 @@ async fn collect_bead_store_summaries(
     (summaries, snapshots, errors, duration_ms)
 }
 
-async fn collect_bead_store_summaries_cached(
-    stores: &[BeadStore],
-    cache: &Mutex<SnapshotIoCache>,
-) -> (Vec<Value>, Vec<BeadStoreSnapshot>, Vec<Value>, u64) {
-    {
-        let cache = cache.lock().expect("snapshot io cache lock poisoned");
-        if let Some(cached) = &cache.bead_stores {
-            if cached.stores == stores && cached.collected_at.elapsed() <= DB_BACKED_COLLECTION_TTL
-            {
-                return (
-                    cached.summaries.clone(),
-                    cached.snapshots.clone(),
-                    cached.errors.clone(),
-                    0,
-                );
-            }
-        }
-    }
-
-    let (summaries, snapshots, errors, duration_ms) = collect_bead_store_summaries(stores).await;
-    {
-        let mut cache = cache.lock().expect("snapshot io cache lock poisoned");
-        cache.bead_stores = Some(CachedBeadStoreCollection {
-            stores: stores.to_vec(),
-            collected_at: Instant::now(),
-            summaries: summaries.clone(),
-            snapshots: snapshots.clone(),
-            errors: errors.clone(),
-        });
-    }
-    (summaries, snapshots, errors, duration_ms)
-}
-
 /// Issue `issue_type` values that are rendered on the task graph. Anything
 /// else (messages, escalations, custom types) is filtered out unless it also
 /// qualifies as a system issue. Mirrors `GRAPH_ALLOWED_TYPES` in
@@ -2282,7 +2251,45 @@ fn issue_is_system(issue: &Value) -> bool {
     false
 }
 
+fn issue_is_identity_bead(issue: &Value) -> bool {
+    if issue_label_contains(issue, "gt:rig") {
+        return true;
+    }
+    let description = issue
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim_start()
+        .to_ascii_lowercase();
+    if description.starts_with("rig identity bead for ")
+        || description.starts_with("polecat identity bead for ")
+    {
+        return true;
+    }
+    if issue_label_contains(issue, "gt:agent") {
+        let meta = parse_simple_metadata_block(&description);
+        let role_type_is_polecat = meta
+            .get("role_type")
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("polecat"));
+        let id = issue
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let title = issue
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        return role_type_is_polecat || id.contains("-polecat-") || title.contains("-polecat-");
+    }
+    false
+}
+
 fn issue_is_graph_noise(issue: &Value) -> bool {
+    if issue_is_identity_bead(issue) {
+        return true;
+    }
     let issue_type = issue
         .get("issue_type")
         .and_then(Value::as_str)
@@ -2303,45 +2310,18 @@ fn issue_is_graph_noise(issue: &Value) -> bool {
     false
 }
 
-fn derive_ui_status(
-    issue: &Value,
-    blocked_ids: &HashSet<String>,
-    hooked_ids: &HashSet<String>,
-) -> &'static str {
-    let status = issue
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("open");
-    let id = issue.get("id").and_then(Value::as_str).unwrap_or("");
-    if status == "closed" {
-        return "done";
-    }
-    if status == "hooked" || status == "in_progress" || hooked_ids.contains(id) {
-        return "running";
-    }
-    if status == "deferred" {
-        return "ice";
-    }
-    if status == "blocked" || blocked_ids.contains(id) {
-        return "stuck";
-    }
-    "ready"
-}
-
 /// Implementation of `compact_issue` in `the runtime contract`. Collapses a raw bead
-/// payload down to the fields the graph renderer needs, plus the derived
-/// `ui_status` / `is_system` labels.
+/// payload down to the fields the graph renderer needs.
 fn compact_issue(
     issue: &Value,
-    blocked_ids: &HashSet<String>,
-    hooked_ids: &HashSet<String>,
+    _blocked_ids: &HashSet<String>,
+    _hooked_ids: &HashSet<String>,
 ) -> Value {
     json!({
         "id": issue.get("id").and_then(Value::as_str).unwrap_or(""),
         "title": issue.get("title").and_then(Value::as_str).unwrap_or(""),
         "description": issue.get("description").and_then(Value::as_str).unwrap_or(""),
         "status": issue.get("status").and_then(Value::as_str).unwrap_or(""),
-        "ui_status": derive_ui_status(issue, blocked_ids, hooked_ids),
         "priority": issue.get("priority").cloned().unwrap_or(Value::Null),
         "type": issue.get("issue_type").and_then(Value::as_str).unwrap_or(""),
         "owner": issue.get("owner").and_then(Value::as_str).unwrap_or(""),
@@ -2380,10 +2360,6 @@ pub struct BeadData {
     /// Merge-request beads translated into a flat `{task_id, commit_sha, …}`
     /// list. Consumed downstream by `collect_git_memory` in gui-cqe.7.
     pub merge_links: Vec<Value>,
-    /// Derived `ui_status` counters over non-system task nodes, plus a
-    /// `system_running` tally for system tasks. Matches the `summary` dict
-    /// snapshot contract returns from `collect_bead_data`.
-    pub summary: BTreeMap<String, u64>,
 }
 
 /// Implementation of `collect_bead_data` in `the runtime contract`. The per-store `bd`
@@ -2477,10 +2453,6 @@ pub fn collect_bead_data(
     }
 
     let mut nodes: Vec<Value> = Vec::new();
-    let mut summary: BTreeMap<String, u64> = BTreeMap::new();
-    for key in ["ready", "running", "stuck", "done", "ice", "system_running"] {
-        summary.insert(key.into(), 0);
-    }
 
     for id in &issue_order {
         let Some(issue) = issue_by_id.get(id) else {
@@ -2502,22 +2474,6 @@ pub fn collect_bead_data(
             obj.insert("kind".into(), Value::String("task".into()));
             obj.insert("scope".into(), Value::String(scope));
             obj.insert("agent_targets".into(), Value::Array(agent_targets));
-        }
-        let is_system = node
-            .get("is_system")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let ui_status = node
-            .get("ui_status")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        if is_system {
-            if ui_status == "running" {
-                *summary.entry("system_running".into()).or_insert(0) += 1;
-            }
-        } else {
-            *summary.entry(ui_status).or_insert(0) += 1;
         }
         nodes.push(node);
     }
@@ -2576,7 +2532,6 @@ pub fn collect_bead_data(
         blocked_ids: blocked_sorted,
         hooked_ids: hooked_sorted,
         merge_links,
-        summary,
     }
 }
 
@@ -2773,7 +2728,7 @@ pub struct GitMemory {
 }
 
 impl GitMemory {
-    /// Render the git memory as a `serde_json::Value` matching the snapshot contract
+    /// Render the Git history as a `serde_json::Value` matching the snapshot contract
     /// shape.
     pub fn into_json(self) -> Value {
         let task_memory: serde_json::Map<String, Value> = self
@@ -3200,6 +3155,13 @@ pub async fn collect_git_memory(
 ///   payload; when absent or zero they fall back to
 ///   `len(tracked_ids) if closed else 0` and `len(tracked_ids)` respectively.
 pub async fn collect_convoy_data(gt_root: &Path) -> (Value, Vec<Value>, u64) {
+    fn raw_timestamp<'a>(raw: &'a Value, snake_key: &str, camel_key: &str) -> &'a str {
+        raw.get(snake_key)
+            .and_then(Value::as_str)
+            .or_else(|| raw.get(camel_key).and_then(Value::as_str))
+            .unwrap_or("")
+    }
+
     let result = run_command(
         &["bd", "list", "--type=convoy", "--all", "--json"],
         gt_root,
@@ -3344,6 +3306,9 @@ pub async fn collect_convoy_data(gt_root: &Path) -> (Value, Vec<Value>, u64) {
             "tracked_ids": tracked_ids,
             "completed": completed,
             "total": total,
+            "created_at": raw_timestamp(raw, "created_at", "createdAt"),
+            "updated_at": raw_timestamp(raw, "updated_at", "updatedAt"),
+            "closed_at": raw_timestamp(raw, "closed_at", "closedAt"),
         }));
     }
 
@@ -3377,34 +3342,6 @@ pub async fn collect_convoy_data(gt_root: &Path) -> (Value, Vec<Value>, u64) {
     )
 }
 
-async fn collect_convoy_data_cached(
-    gt_root: &Path,
-    cache: &Mutex<SnapshotIoCache>,
-) -> (Value, Vec<Value>, u64) {
-    {
-        let cache = cache.lock().expect("snapshot io cache lock poisoned");
-        if let Some(cached) = &cache.convoys {
-            if cached.gt_root == gt_root
-                && cached.collected_at.elapsed() <= DB_BACKED_COLLECTION_TTL
-            {
-                return (cached.convoys.clone(), cached.errors.clone(), 0);
-            }
-        }
-    }
-
-    let (convoys, errors, duration_ms) = collect_convoy_data(gt_root).await;
-    {
-        let mut cache = cache.lock().expect("snapshot io cache lock poisoned");
-        cache.convoys = Some(CachedConvoyCollection {
-            gt_root: gt_root.to_path_buf(),
-            collected_at: Instant::now(),
-            convoys: convoys.clone(),
-            errors: errors.clone(),
-        });
-    }
-    (convoys, errors, duration_ms)
-}
-
 /// Implementation of `finalize_graph` in `the runtime contract`. Takes the raw
 /// `bead_data` graph (nodes + edges) and layers on:
 ///
@@ -3415,17 +3352,13 @@ async fn collect_convoy_data_cached(
 ///    Commit nodes carry enough context (`sha`, `short_sha`, `repo_id`,
 ///    `repo_label`, `branch`, `available_local`, `scope`, `updated_at`,
 ///    `parent`) for the graph renderer to badge them correctly.
-/// 3. An "interesting" filter: only nodes that are on an edge, referenced by
-///    a convoy's `task_index`, carry agent hooks, have linked commits, have
-///    a running/stuck `ui_status`, or are system nodes in a live state
-///    (`ready`/`running`/`stuck`) survive. Commit nodes survive only when
-///    their parent task survived. Edges are then pruned to endpoints that
-///    are still present.
+/// 3. Compact GT task nodes are kept directly. Commit nodes survive only when
+///    their parent task survived. Edges are then pruned to endpoints that are
+///    still present.
 ///
-/// The output shape is `{nodes, edges}` with the same field schema the snapshot contract
-/// port returned, so downstream consumers (activity grouping in gui-cqe.10,
-/// the Tauri IPC surface, the frontend graph renderer) need no changes.
-fn finalize_graph(bead_data: &BeadData, git_memory: &GitMemory, convoys: &Value) -> Value {
+/// The output shape is `{nodes, edges}`. Task `status` is the raw GT status;
+/// the backend does not emit a separate UI status layer.
+fn finalize_graph(bead_data: &BeadData, git_memory: &GitMemory) -> Value {
     let mut nodes: Vec<Value> = bead_data.nodes.clone();
     let mut edges: Vec<Value> = bead_data.edges.clone();
 
@@ -3445,12 +3378,6 @@ fn finalize_graph(bead_data: &BeadData, git_memory: &GitMemory, convoys: &Value)
             Some((id, scope))
         })
         .collect();
-
-    let convoy_task_ids: HashSet<String> = convoys
-        .get("task_index")
-        .and_then(Value::as_object)
-        .map(|obj| obj.keys().filter(|k| !k.is_empty()).cloned().collect())
-        .unwrap_or_default();
 
     // (1) Attach linked_commits / linked_commit_count to every bead-data node.
     for node in nodes.iter_mut() {
@@ -3527,8 +3454,7 @@ fn finalize_graph(bead_data: &BeadData, git_memory: &GitMemory, convoys: &Value)
                     "kind": "commit",
                     "title": title,
                     "description": "",
-                    "status": "memory",
-                    "ui_status": "memory",
+                    "status": "commit",
                     "priority": Value::Null,
                     "type": "commit",
                     "owner": "",
@@ -3576,50 +3502,8 @@ fn finalize_graph(bead_data: &BeadData, git_memory: &GitMemory, convoys: &Value)
 
     nodes.extend(commit_nodes);
 
-    // (3) Compute the "interesting" set: edge endpoints, convoy-tracked tasks,
-    //     nodes with agent hooks, nodes with linked commits, live task nodes
-    //     (running/stuck), and system nodes in a live state.
-    let mut interesting_ids: HashSet<String> = HashSet::new();
-    for edge in &edges {
-        if let Some(s) = edge.get("source").and_then(Value::as_str) {
-            interesting_ids.insert(s.to_string());
-        }
-        if let Some(t) = edge.get("target").and_then(Value::as_str) {
-            interesting_ids.insert(t.to_string());
-        }
-    }
-    interesting_ids.extend(convoy_task_ids);
-    for node in &nodes {
-        let Some(id) = node.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        if id.is_empty() {
-            continue;
-        }
-        let has_agents = node
-            .get("agent_targets")
-            .and_then(Value::as_array)
-            .map(|a| !a.is_empty())
-            .unwrap_or(false);
-        let has_commits = node
-            .get("linked_commit_count")
-            .and_then(Value::as_u64)
-            .map(|n| n > 0)
-            .unwrap_or(false);
-        let ui_status = node.get("ui_status").and_then(Value::as_str).unwrap_or("");
-        let is_system = node
-            .get("is_system")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let running_or_stuck = matches!(ui_status, "running" | "stuck");
-        let system_live = is_system && matches!(ui_status, "ready" | "running" | "stuck");
-        if has_agents || has_commits || running_or_stuck || system_live {
-            interesting_ids.insert(id.to_string());
-        }
-    }
-
-    // (4) Filter nodes, then prune edges to surviving endpoints. Commit nodes
-    //     stay only when their parent task stayed.
+    // (3) Keep compacted GT task nodes directly. Commit nodes stay only when
+    //     their parent task stayed, then edges are pruned to surviving endpoints.
     let mut kept_ids: HashSet<String> = HashSet::new();
     let filtered_nodes: Vec<Value> = nodes
         .into_iter()
@@ -3632,9 +3516,9 @@ fn finalize_graph(bead_data: &BeadData, git_memory: &GitMemory, convoys: &Value)
                 .to_string();
             let keep = if kind == "commit" {
                 let parent = node.get("parent").and_then(Value::as_str).unwrap_or("");
-                !parent.is_empty() && interesting_ids.contains(parent)
+                !parent.is_empty() && kept_ids.contains(parent)
             } else {
-                interesting_ids.contains(&id)
+                !id.is_empty()
             };
             if keep && !id.is_empty() {
                 kept_ids.insert(id);
@@ -3661,14 +3545,13 @@ fn finalize_graph(bead_data: &BeadData, git_memory: &GitMemory, convoys: &Value)
 /// Implementation of `build_activity_groups` in `the runtime contract`. Buckets every
 /// agent by its hooked bead id, enriching each group with the finalized graph
 /// node's title/status/scope (falling back to the agent's hook data when a
-/// node is absent) and the per-task commit/merge memory produced by
+/// node is absent) and the per-task linked commit entries produced by
 /// `collect_git_memory`. Agents with no bead id but live signal
 /// (events, a tmux session, or a runtime state) land in `unassigned_agents`.
 ///
 /// Event lists are tailed: up to 6 events per agent payload, up to 10 per
-/// group. Groups are sorted by (system-last, ui_status priority, task_id) to
-/// match the snapshot contract contract; unassigned agents are sorted by `target` for
-/// stable rendering.
+/// group. Groups are sorted by (system-last, task_id); unassigned agents are
+/// sorted by `target` for stable rendering.
 fn build_activity_groups(
     agents: &[AgentInfo],
     graph_nodes: &[Value],
@@ -3765,16 +3648,6 @@ fn build_activity_groups(
                             .unwrap_or("")
                             .to_string()
                     });
-                let ui_status = node
-                    .and_then(|n| n.get("ui_status"))
-                    .and_then(Value::as_str)
-                    .map(String::from)
-                    .unwrap_or_else(|| {
-                        hook.get("status")
-                            .and_then(Value::as_str)
-                            .unwrap_or("running")
-                            .to_string()
-                    });
                 let is_system = match node
                     .and_then(|n| n.get("is_system"))
                     .and_then(Value::as_bool)
@@ -3797,7 +3670,6 @@ fn build_activity_groups(
                     task_id: bead_id.clone(),
                     title,
                     stored_status,
-                    ui_status,
                     is_system,
                     scope,
                     agents: Vec::new(),
@@ -3824,27 +3696,8 @@ fn build_activity_groups(
     }
 
     task_groups.sort_by(|a, b| {
-        fn status_order(s: &str) -> u8 {
-            match s {
-                "running" => 0,
-                "stuck" => 1,
-                "ready" => 2,
-                "ice" => 3,
-                "done" => 4,
-                "memory" => 5,
-                _ => 9,
-            }
-        }
-        let a_key = (
-            u8::from(a.is_system),
-            status_order(&a.ui_status),
-            a.task_id.as_str(),
-        );
-        let b_key = (
-            u8::from(b.is_system),
-            status_order(&b.ui_status),
-            b.task_id.as_str(),
-        );
+        let a_key = (u8::from(a.is_system), a.task_id.as_str());
+        let b_key = (u8::from(b.is_system), b.task_id.as_str());
         a_key.cmp(&b_key)
     });
 
@@ -3884,7 +3737,7 @@ async fn collect_polecats(gt_root: &Path) -> (Vec<Value>, Vec<Value>, u64) {
 
 /// Implementation of `collect_agents` in `the runtime contract`. Merges tmux panes, crew rows,
 /// and polecat runtime state into a single agent list, then enriches each
-/// entry with its hook (via parallel `gt hook show <target> --json` calls) and
+/// entry with hook state from the bulk hooked-bead index and
 /// replays feed events into per-agent `events` / `task_events` / `recent_task`
 /// slots. Also returns `hook_by_issue`, keyed by bead id, for downstream
 /// collectors that need to know which agents are attached to which issue.
@@ -3985,26 +3838,25 @@ async fn collect_agents(
 
     let (event_map, task_event_map) = classify_feed_events(feed_events);
 
-    // Hook state is already included in the bulk hooked bead query. Building
-    // the per-agent view here avoids one `gt hook show` subprocess per agent
-    // on every refresh.
+    // Build the hook inverted index from the already-collected hooked bead
+    // rows. This avoids an N-agent `gt hook show` fan-out on every poll.
     let mut hook_by_issue: HashMap<String, Vec<String>> = HashMap::new();
     for (target, agent) in agents_by_target.iter_mut() {
-        let data = hook_by_agent
-            .get(target)
-            .cloned()
-            .unwrap_or_else(|| json!({"agent": target, "status": "empty"}));
-        let bead_id = data
-            .get("bead_id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        agent.hook = data;
-        if !bead_id.is_empty() {
-            hook_by_issue
-                .entry(bead_id)
-                .or_default()
-                .push(target.clone());
+        if let Some(hook) = hook_by_agent.get(target) {
+            let bead_id = hook
+                .get("bead_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            agent.hook = hook.clone();
+            if !bead_id.is_empty() {
+                hook_by_issue
+                    .entry(bead_id)
+                    .or_default()
+                    .push(target.clone());
+            }
+        } else {
+            agent.hook = json!({"agent": target, "status": "empty"});
         }
     }
 
@@ -4442,14 +4294,9 @@ mod tests {
         assert!(store.refresh_once().await);
         let after = store.get();
         assert!(!after.gt_root.is_empty());
-        // When `gt` is missing we expect ≤ 6 synthetic errors (five
-        // top-level commands + one `gt polecat list --all --json` inside
-        // `collect_agents`). When `gt` is installed the polecat list may
-        // succeed, which in turn triggers a hook lookup per discovered
-        // agent — that can push the error count over 6 on CI boxes where
-        // `gt hook show` fails against a `/tmp` cwd. We only assert the
-        // snapshot actually installed; the exact count is
-        // environment-dependent.
+        // When `gt` is missing we expect synthetic command errors; when it is
+        // installed the exact count depends on the local Gas Town workspace.
+        // We only assert the snapshot actually installed.
         let _ = after.summary.command_errors;
     }
 
@@ -4480,7 +4327,6 @@ mod tests {
         let store = SnapshotStore::new("/tmp/store-test");
         let snap = store.get();
         assert_eq!(snap.gt_root, "/tmp/store-test");
-        assert_eq!(snap.status_legend.len(), 7);
         assert_eq!(snap.alerts.len(), 0);
     }
 
@@ -4734,8 +4580,9 @@ mod tests {
             tmux_socket: String::new(),
             ..StatusSummary::default()
         };
+        let hook_by_agent = HashMap::new();
         let (agents, hook_by_issue, _errors, _ms) =
-            collect_agents(&tmp_root(), &status, &[], &[], &HashMap::new()).await;
+            collect_agents(&tmp_root(), &status, &[], &[], &hook_by_agent).await;
         for agent in &agents {
             // Every agent must carry a non-empty target and a resolved role.
             assert!(!agent.target.is_empty());
@@ -4921,6 +4768,118 @@ mod tests {
     }
 
     #[test]
+    fn build_hook_index_maps_hooked_rows_by_assignee() {
+        let snap = bead_snapshot(
+            "hq",
+            "hq",
+            Vec::new(),
+            Vec::new(),
+            vec![
+                json!({
+                    "id": "gt-old",
+                    "title": "Older hook",
+                    "status": "hooked",
+                    "assignee": "gtui/polecats/nux",
+                    "updated_at": "2026-04-24T00:00:00Z",
+                    "created_at": "2026-04-24T00:00:00Z",
+                }),
+                json!({
+                    "id": "gt-new",
+                    "title": "Newer hook",
+                    "status": "hooked",
+                    "assignee": "gtui/polecats/nux",
+                    "updated_at": "2026-04-24T00:01:00Z",
+                    "created_at": "2026-04-24T00:00:00Z",
+                }),
+                json!({
+                    "id": "gt-unassigned",
+                    "title": "No assignee",
+                    "status": "hooked",
+                }),
+            ],
+        );
+
+        let hooks = build_hook_index(&[snap]);
+
+        assert_eq!(hooks.len(), 1);
+        let hook = hooks.get("gtui/polecats/nux").expect("nux hook");
+        assert_eq!(hook["agent"], "gtui/polecats/nux");
+        assert_eq!(hook["bead_id"], "gt-new");
+        assert_eq!(hook["title"], "Newer hook");
+        assert_eq!(hook["status"], "hooked");
+    }
+
+    #[tokio::test]
+    async fn cached_bead_store_collector_reuses_fresh_entry() {
+        let store = BeadStore {
+            name: "hq".into(),
+            path: PathBuf::from("/tmp/hq"),
+            scope: "hq".into(),
+        };
+        let snapshot = bead_snapshot(
+            "hq",
+            "hq",
+            vec![json!({"id": "gt-1", "title": "Cached"})],
+            Vec::new(),
+            Vec::new(),
+        );
+        let cache = Mutex::new(SnapshotIoCache {
+            bead_stores: Some(CachedBeadStoreCollection {
+                stores: vec![store.clone()],
+                collected_at: Instant::now(),
+                summaries: vec![json!({"name": "hq", "total": 1})],
+                snapshots: vec![snapshot],
+                errors: vec![json!({"error": "cached error stays visible"})],
+            }),
+            convoys: None,
+            git_memory: None,
+        });
+
+        let (summaries, snapshots, errors, duration_ms) =
+            collect_bead_store_summaries_cached(&[store], &cache).await;
+
+        assert_eq!(duration_ms, 0);
+        assert_eq!(summaries[0]["total"], 1);
+        assert_eq!(snapshots[0].issues[0]["id"], "gt-1");
+        assert_eq!(errors[0]["error"], "cached error stays visible");
+    }
+
+    #[tokio::test]
+    async fn cached_git_memory_collector_reuses_fresh_entry() {
+        let gt_root = PathBuf::from("/tmp/gt");
+        let crews = vec![json!({
+            "path": "/tmp/gt/gtui/polecats/nux",
+            "rig": "gtui",
+            "name": "nux",
+        })];
+        let merge_links = vec![json!({
+            "task_id": "gt-1",
+            "commit_sha": "abcdef012345",
+        })];
+        let mut git_memory = GitMemory::default();
+        git_memory.repos.push(json!({"id": "repo-cached"}));
+        let cache = Mutex::new(SnapshotIoCache {
+            bead_stores: None,
+            convoys: None,
+            git_memory: Some(CachedGitMemoryCollection {
+                gt_root: gt_root.clone(),
+                crews_key: git_memory_crews_key(&crews),
+                merge_links: merge_links.clone(),
+                collected_at: Instant::now(),
+                git_memory,
+                errors: vec![json!({"error": "cached git error stays visible"})],
+            }),
+        });
+
+        let (memory, errors, duration_ms) =
+            collect_git_memory_cached(&gt_root, &crews, &merge_links, &cache).await;
+
+        assert_eq!(duration_ms, 0);
+        assert_eq!(memory.repos[0]["id"], "repo-cached");
+        assert_eq!(errors[0]["error"], "cached git error stays visible");
+    }
+
+    #[test]
     fn parse_simple_metadata_block_extracts_key_value_lines() {
         let meta = parse_simple_metadata_block(
             "source_issue: gt-123\ncommit_sha: deadbeef\n\nignored body",
@@ -4972,6 +4931,27 @@ mod tests {
 
     #[test]
     fn issue_is_graph_noise_filters_non_allowed_types_and_labels() {
+        // Identity beads describe GT runtime inventory, not work to render in
+        // the task spine.
+        assert!(issue_is_graph_noise(&json!({
+            "id": "tg-rig-thgames_client",
+            "issue_type": "task",
+            "labels": ["gt:rig"],
+            "description": "Rig identity bead for thgames_client.",
+        })));
+        assert!(issue_is_graph_noise(&json!({
+            "id": "pc-furiosa",
+            "issue_type": "task",
+            "labels": [],
+            "description": "Polecat identity bead for furiosa.",
+        })));
+        assert!(issue_is_graph_noise(&json!({
+            "id": "gt-gastown-polecat-shiny",
+            "title": "gt-gastown-polecat-shiny",
+            "issue_type": "task",
+            "labels": ["gt:agent"],
+            "description": "gt-gastown-polecat-shiny\n\nrole_type: polecat\nrig: gastown\nagent_state: nuked",
+        })));
         // Random issue_type with no system marker → noise.
         assert!(issue_is_graph_noise(
             &json!({"issue_type": "mail", "labels": []})
@@ -4997,38 +4977,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_ui_status_covers_all_branches() {
-        let blocked: HashSet<String> = ["b1".into()].into_iter().collect();
-        let hooked: HashSet<String> = ["h1".into()].into_iter().collect();
-
-        assert_eq!(
-            derive_ui_status(&json!({"id": "a", "status": "closed"}), &blocked, &hooked),
-            "done"
-        );
-        assert_eq!(
-            derive_ui_status(&json!({"id": "a", "status": "hooked"}), &blocked, &hooked),
-            "running"
-        );
-        assert_eq!(
-            derive_ui_status(&json!({"id": "h1", "status": "open"}), &blocked, &hooked),
-            "running"
-        );
-        assert_eq!(
-            derive_ui_status(&json!({"id": "a", "status": "deferred"}), &blocked, &hooked),
-            "ice"
-        );
-        assert_eq!(
-            derive_ui_status(&json!({"id": "b1", "status": "open"}), &blocked, &hooked),
-            "stuck"
-        );
-        assert_eq!(
-            derive_ui_status(&json!({"id": "other", "status": "open"}), &blocked, &hooked),
-            "ready"
-        );
-    }
-
-    #[test]
-    fn collect_bead_data_compacts_issues_and_derives_summary() {
+    fn collect_bead_data_compacts_issues_without_status_translation() {
         let issues = vec![
             json!({
                 "id": "gt-1",
@@ -5073,6 +5022,24 @@ mod tests {
                 "dependencies": [],
             }),
             json!({
+                "id": "gt-rig-gastown",
+                "title": "gastown",
+                "description": "Rig identity bead for gastown.\n\nrepo: https://example.invalid/gastown.git",
+                "status": "open",
+                "issue_type": "task",
+                "labels": ["gt:rig"],
+                "dependencies": [],
+            }),
+            json!({
+                "id": "gt-gastown-polecat-shiny",
+                "title": "gt-gastown-polecat-shiny",
+                "description": "gt-gastown-polecat-shiny\n\nrole_type: polecat\nrig: gastown\nagent_state: nuked",
+                "status": "open",
+                "issue_type": "task",
+                "labels": ["gt:agent"],
+                "dependencies": [],
+            }),
+            json!({
                 "id": "hq-wisp-x",
                 "title": "Running molecule",
                 "status": "hooked",
@@ -5103,8 +5070,8 @@ mod tests {
             .iter()
             .filter_map(|n| n.get("id").and_then(Value::as_str).map(String::from))
             .collect();
-        // Merge issue and gt:message issue are filtered out; molecule kept as
-        // system task; gt-1..gt-4 all kept.
+        // Merge, gt:message, and identity beads are filtered out; molecule kept
+        // as system task; gt-1..gt-4 all kept.
         assert!(node_ids.contains(&"gt-1".to_string()));
         assert!(node_ids.contains(&"gt-2".to_string()));
         assert!(node_ids.contains(&"gt-3".to_string()));
@@ -5112,6 +5079,8 @@ mod tests {
         assert!(node_ids.contains(&"hq-wisp-x".to_string()));
         assert!(!node_ids.contains(&"gt-merge-1".to_string()));
         assert!(!node_ids.contains(&"gt-5".to_string()));
+        assert!(!node_ids.contains(&"gt-rig-gastown".to_string()));
+        assert!(!node_ids.contains(&"gt-gastown-polecat-shiny".to_string()));
 
         // Compacted node carries kind, scope, agent_targets.
         let gt1 = bead
@@ -5121,31 +5090,23 @@ mod tests {
             .expect("gt-1 node");
         assert_eq!(gt1["kind"], "task");
         assert_eq!(gt1["scope"], "hq");
-        assert_eq!(gt1["ui_status"], "running");
+        assert_eq!(gt1["status"], "in_progress");
         assert_eq!(gt1["agent_targets"][0], "gtui/polecats/nux");
         assert_eq!(gt1["is_system"], false);
 
-        // Blocked dep sets ui_status to stuck even though status=open.
+        // Blocked dependency metadata does not rewrite GT's stored status.
         let gt2 = bead
             .nodes
             .iter()
             .find(|n| n.get("id").and_then(Value::as_str) == Some("gt-2"))
             .expect("gt-2 node");
-        assert_eq!(gt2["ui_status"], "stuck");
+        assert_eq!(gt2["status"], "open");
 
         // Single edge for gt-1 -> gt-2 dependency.
         assert_eq!(bead.edges.len(), 1);
         assert_eq!(bead.edges[0]["source"], "gt-1");
         assert_eq!(bead.edges[0]["target"], "gt-2");
         assert_eq!(bead.edges[0]["kind"], "dependency");
-
-        // Summary counters.
-        assert_eq!(bead.summary.get("running"), Some(&1));
-        assert_eq!(bead.summary.get("stuck"), Some(&1));
-        assert_eq!(bead.summary.get("ice"), Some(&1));
-        assert_eq!(bead.summary.get("done"), Some(&1));
-        assert_eq!(bead.summary.get("ready"), Some(&0));
-        assert_eq!(bead.summary.get("system_running"), Some(&1));
 
         // Merge links derived from the merge-request bead.
         assert_eq!(bead.merge_links.len(), 1);
@@ -5279,7 +5240,7 @@ mod tests {
 
     #[test]
     fn find_issue_ids_returns_sorted_unique_matches() {
-        let subject = "fix: port git memory (gui-cqe.7) — refs hq-abc, hq-ABC, gui-cqe.7";
+        let subject = "fix: port git history (gui-cqe.7) - refs hq-abc, hq-ABC, gui-cqe.7";
         let ids = find_issue_ids(subject);
         assert_eq!(ids, vec!["gui-cqe.7", "hq-ABC", "hq-abc"]);
     }
@@ -5307,7 +5268,7 @@ mod tests {
     #[test]
     fn parse_git_log_emits_one_entry_per_well_formed_line() {
         let text = format!(
-            "{sha}\x1f{short}\x1f{when}\x1fHEAD -> main\x1ffix: port git memory (gui-cqe.7)\nmalformed line with no separators\n",
+            "{sha}\x1f{short}\x1f{when}\x1fHEAD -> main\x1ffix: port git history (gui-cqe.7)\nmalformed line with no separators\n",
             sha = "a".repeat(40),
             short = "aaaaaaa",
             when = "2026-04-22T08:01:00+00:00",
@@ -5319,13 +5280,13 @@ mod tests {
         assert_eq!(commit["repo_label"], "Town Root");
         assert_eq!(commit["short_sha"], "aaaaaaa");
         assert_eq!(commit["refs"], "HEAD -> main");
-        assert_eq!(commit["subject"], "fix: port git memory (gui-cqe.7)");
+        assert_eq!(commit["subject"], "fix: port git history (gui-cqe.7)");
         assert_eq!(commit["task_ids"][0], "gui-cqe.7");
     }
 
     #[test]
     fn parse_git_branches_marks_current_and_splits_fields() {
-        let text = "*\x1fmain\x1fabcdef0\x1f2026-04-22T08:00:00+00:00\x1fport git memory\n\x1ffeature/x\x1f1234567\x1f2026-04-20T10:00:00+00:00\x1fWIP feature\n";
+        let text = "*\x1fmain\x1fabcdef0\x1f2026-04-22T08:00:00+00:00\x1fport git history\n\x1ffeature/x\x1f1234567\x1f2026-04-20T10:00:00+00:00\x1fWIP feature\n";
         let branches = parse_git_branches(text);
         assert_eq!(branches.len(), 2);
         assert_eq!(branches[0]["current"], true);
@@ -5710,6 +5671,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_terminal_state_reuses_fresh_cached_view() {
+        let store = SnapshotStore::new(tempfile::tempdir().expect("tempdir").path().to_path_buf());
+        store.cache_terminal_state("gtui/polecats/nux", json!({"cached": true}));
+
+        let state = store
+            .get_terminal_state("gtui/polecats/nux")
+            .await
+            .expect("terminal state");
+
+        assert_eq!(state["cached"], true);
+    }
+
+    #[tokio::test]
     async fn get_terminal_state_errors_for_unknown_target_via_store() {
         let store = SnapshotStore::new(tempfile::tempdir().expect("tempdir").path().to_path_buf());
         let err = store
@@ -6001,13 +5975,12 @@ mod convoy_tests {
 mod finalize_graph_tests {
     use super::*;
 
-    fn task_node(id: &str, ui_status: &str, extra: Value) -> Value {
+    fn task_node(id: &str, status: &str, extra: Value) -> Value {
         let mut node = json!({
             "id": id,
             "title": id,
             "description": "",
-            "status": "open",
-            "ui_status": ui_status,
+            "status": status,
             "priority": Value::Null,
             "type": "task",
             "owner": "",
@@ -6052,7 +6025,7 @@ mod finalize_graph_tests {
     #[test]
     fn layers_linked_commits_and_creates_commit_nodes() {
         let bead_data = BeadData {
-            nodes: vec![task_node("gui-cqe.9", "running", json!({}))],
+            nodes: vec![task_node("gui-cqe.9", "in_progress", json!({}))],
             edges: vec![],
             ..BeadData::default()
         };
@@ -6070,8 +6043,7 @@ mod finalize_graph_tests {
             ..GitMemory::default()
         };
 
-        let convoys = json!({"convoys": [], "task_index": {}});
-        let graph = finalize_graph(&bead_data, &git_memory, &convoys);
+        let graph = finalize_graph(&bead_data, &git_memory);
 
         let nodes = graph["nodes"].as_array().expect("nodes");
         assert_eq!(nodes.len(), 3, "task node + two commit nodes survive");
@@ -6087,7 +6059,6 @@ mod finalize_graph_tests {
             .find(|n| n["id"] == "commit:abc1234xyz")
             .expect("commit node");
         assert_eq!(commit["kind"], "commit");
-        assert_eq!(commit["ui_status"], "memory");
         assert_eq!(commit["parent"], "gui-cqe.9");
         assert_eq!(commit["sha"], "abc1234xyz");
         assert_eq!(commit["available_local"], true);
@@ -6100,7 +6071,7 @@ mod finalize_graph_tests {
     #[test]
     fn caps_linked_commits_at_three() {
         let bead_data = BeadData {
-            nodes: vec![task_node("t-1", "running", json!({}))],
+            nodes: vec![task_node("t-1", "in_progress", json!({}))],
             edges: vec![],
             ..BeadData::default()
         };
@@ -6115,7 +6086,7 @@ mod finalize_graph_tests {
             task_memory,
             ..GitMemory::default()
         };
-        let graph = finalize_graph(&bead_data, &git_memory, &json!({"task_index": {}}));
+        let graph = finalize_graph(&bead_data, &git_memory);
         let task = graph["nodes"]
             .as_array()
             .unwrap()
@@ -6127,14 +6098,15 @@ mod finalize_graph_tests {
     }
 
     #[test]
-    fn filters_uninteresting_nodes_but_keeps_convoy_and_edge_endpoints() {
-        // Three nodes: one connected by an edge, one in a convoy, one boring.
+    fn keeps_compacted_gt_task_nodes_and_prunes_edges_to_kept_endpoints() {
+        // All compacted task nodes stay; edges still survive only when both
+        // endpoints stay.
         let bead_data = BeadData {
             nodes: vec![
-                task_node("edge-src", "ready", json!({})),
-                task_node("edge-dst", "ready", json!({})),
-                task_node("in-convoy", "ready", json!({})),
-                task_node("boring", "ready", json!({})),
+                task_node("edge-src", "open", json!({})),
+                task_node("edge-dst", "open", json!({})),
+                task_node("in-convoy", "open", json!({})),
+                task_node("boring", "open", json!({})),
             ],
             edges: vec![json!({
                 "source": "edge-src",
@@ -6144,11 +6116,7 @@ mod finalize_graph_tests {
             ..BeadData::default()
         };
         let git_memory = GitMemory::default();
-        let convoys = json!({
-            "convoys": [],
-            "task_index": {"in-convoy": {"total": 1, "open": 1, "closed": 0}},
-        });
-        let graph = finalize_graph(&bead_data, &git_memory, &convoys);
+        let graph = finalize_graph(&bead_data, &git_memory);
         let ids: std::collections::HashSet<String> = graph["nodes"]
             .as_array()
             .unwrap()
@@ -6158,55 +6126,50 @@ mod finalize_graph_tests {
         assert!(ids.contains("edge-src"));
         assert!(ids.contains("edge-dst"));
         assert!(ids.contains("in-convoy"));
-        assert!(!ids.contains("boring"), "boring node should be filtered");
+        assert!(ids.contains("boring"));
         // Edge survives because both endpoints are in the kept set.
         assert_eq!(graph["edges"].as_array().unwrap().len(), 1);
     }
 
     #[test]
-    fn keeps_live_and_hooked_nodes_even_without_edges() {
+    fn keeps_all_compacted_gt_task_nodes_without_status_interpretation() {
         let bead_data = BeadData {
             nodes: vec![
-                task_node("running-alone", "running", json!({})),
-                task_node("stuck-alone", "stuck", json!({})),
+                task_node("progress-alone", "in_progress", json!({})),
+                task_node("blocked-alone", "blocked", json!({})),
                 task_node(
                     "hooked-alone",
-                    "ready",
+                    "open",
                     json!({"agent_targets": ["gtui/polecats/furiosa"]}),
                 ),
-                task_node("system-ready", "ready", json!({"is_system": true})),
-                task_node("system-ice", "ice", json!({"is_system": true})),
-                task_node("boring", "ready", json!({})),
+                task_node("system-open", "open", json!({"is_system": true})),
+                task_node("system-deferred", "deferred", json!({"is_system": true})),
+                task_node("boring", "open", json!({})),
             ],
             edges: vec![],
             ..BeadData::default()
         };
-        let graph = finalize_graph(
-            &bead_data,
-            &GitMemory::default(),
-            &json!({"task_index": {}}),
-        );
+        let graph = finalize_graph(&bead_data, &GitMemory::default());
         let ids: std::collections::HashSet<String> = graph["nodes"]
             .as_array()
             .unwrap()
             .iter()
             .map(|n| n["id"].as_str().unwrap().to_string())
             .collect();
-        assert!(ids.contains("running-alone"));
-        assert!(ids.contains("stuck-alone"));
+        assert!(ids.contains("progress-alone"));
+        assert!(ids.contains("blocked-alone"));
         assert!(ids.contains("hooked-alone"));
-        assert!(ids.contains("system-ready"));
-        assert!(!ids.contains("system-ice"), "ice system node is filtered");
-        assert!(!ids.contains("boring"));
+        assert!(ids.contains("system-open"));
+        assert!(ids.contains("system-deferred"));
+        assert!(ids.contains("boring"));
     }
 
     #[test]
-    fn drops_commit_node_when_parent_is_filtered() {
-        // Task isn't "interesting" on its own (ready, no agents, no edges, not
-        // in a convoy). But it has a linked commit → linked_commit_count > 0
-        // makes it interesting, so both the task and the commit survive.
+    fn keeps_commit_node_when_parent_task_is_kept() {
+        // GT task nodes are kept directly, so linked commits attached to that
+        // task survive with their parent.
         let bead_data = BeadData {
-            nodes: vec![task_node("t-with-commit", "ready", json!({}))],
+            nodes: vec![task_node("t-with-commit", "open", json!({}))],
             edges: vec![],
             ..BeadData::default()
         };
@@ -6219,7 +6182,7 @@ mod finalize_graph_tests {
             task_memory,
             ..GitMemory::default()
         };
-        let graph = finalize_graph(&bead_data, &git_memory, &json!({"task_index": {}}));
+        let graph = finalize_graph(&bead_data, &git_memory);
         let ids: std::collections::HashSet<String> = graph["nodes"]
             .as_array()
             .unwrap()
@@ -6233,7 +6196,7 @@ mod finalize_graph_tests {
     #[test]
     fn skips_commit_entries_with_empty_sha() {
         let bead_data = BeadData {
-            nodes: vec![task_node("t-1", "running", json!({}))],
+            nodes: vec![task_node("t-1", "in_progress", json!({}))],
             edges: vec![],
             ..BeadData::default()
         };
@@ -6255,7 +6218,7 @@ mod finalize_graph_tests {
             task_memory,
             ..GitMemory::default()
         };
-        let graph = finalize_graph(&bead_data, &git_memory, &json!({"task_index": {}}));
+        let graph = finalize_graph(&bead_data, &git_memory);
         let commit_count = graph["nodes"]
             .as_array()
             .unwrap()
@@ -6269,7 +6232,7 @@ mod finalize_graph_tests {
     #[test]
     fn commit_node_falls_back_to_task_scope_when_entry_scope_is_empty() {
         let bead_data = BeadData {
-            nodes: vec![task_node("t-1", "running", json!({"scope": "gastown"}))],
+            nodes: vec![task_node("t-1", "in_progress", json!({"scope": "gastown"}))],
             edges: vec![],
             ..BeadData::default()
         };
@@ -6281,7 +6244,7 @@ mod finalize_graph_tests {
             task_memory,
             ..GitMemory::default()
         };
-        let graph = finalize_graph(&bead_data, &git_memory, &json!({"task_index": {}}));
+        let graph = finalize_graph(&bead_data, &git_memory);
         let commit = graph["nodes"]
             .as_array()
             .unwrap()
@@ -6316,7 +6279,7 @@ mod build_activity_groups_tests {
             hook: if bead_id.is_empty() {
                 Value::Null
             } else {
-                json!({"bead_id": bead_id, "title": "hook title", "status": "running"})
+                json!({"bead_id": bead_id, "title": "hook title", "status": "hooked"})
             },
             events,
             crew: Value::Null,
@@ -6325,12 +6288,11 @@ mod build_activity_groups_tests {
         }
     }
 
-    fn task_node(id: &str, ui_status: &str, extras: Value) -> Value {
+    fn task_node(id: &str, status: &str, extras: Value) -> Value {
         let mut node = json!({
             "id": id,
             "title": format!("Task {id}"),
-            "status": "open",
-            "ui_status": ui_status,
+            "status": status,
             "is_system": false,
             "scope": "gtui",
         });
@@ -6348,7 +6310,7 @@ mod build_activity_groups_tests {
             agent("gtui/polecats/nux", "gui-cqe.10", vec![], true, ""),
             agent("gtui/polecats/furiosa", "gui-cqe.10", vec![], true, ""),
         ];
-        let nodes = vec![task_node("gui-cqe.10", "running", json!({}))];
+        let nodes = vec![task_node("gui-cqe.10", "hooked", json!({}))];
         let activity = build_activity_groups(&agents, &nodes, &BTreeMap::new());
         assert_eq!(activity.groups.len(), 1);
         let group = &activity.groups[0];
@@ -6365,15 +6327,12 @@ mod build_activity_groups_tests {
         a.hook = json!({
             "bead_id": "gui-cqe.99",
             "title": "mol-polecat-work",
-            "status": "ready",
+            "status": "open",
         });
         let activity = build_activity_groups(&[a], &[], &BTreeMap::new());
         let group = &activity.groups[0];
         assert_eq!(group.title, "mol-polecat-work");
-        assert_eq!(group.stored_status, "ready");
-        // ui_status defaults to "running" when neither node nor hook.status="running" override it.
-        // Here hook.status is "ready", which is used as ui_status fallback.
-        assert_eq!(group.ui_status, "ready");
+        assert_eq!(group.stored_status, "open");
         assert!(group.is_system, "mol- prefix should classify as system");
     }
 
@@ -6396,7 +6355,7 @@ mod build_activity_groups_tests {
     #[test]
     fn attaches_task_memory_entries_to_group() {
         let agents = vec![agent("gtui/polecats/nux", "gui-cqe.10", vec![], true, "")];
-        let nodes = vec![task_node("gui-cqe.10", "running", json!({}))];
+        let nodes = vec![task_node("gui-cqe.10", "hooked", json!({}))];
         let mut task_memory = BTreeMap::new();
         task_memory.insert(
             "gui-cqe.10".to_string(),
@@ -6409,25 +6368,25 @@ mod build_activity_groups_tests {
     }
 
     #[test]
-    fn sorts_groups_by_system_flag_then_status_then_id() {
+    fn sorts_groups_by_system_flag_then_id() {
         let agents = vec![
             agent("a/1", "sys-run", vec![], true, ""),
-            agent("a/2", "task-ready", vec![], true, ""),
-            agent("a/3", "task-running", vec![], true, ""),
-            agent("a/4", "task-stuck", vec![], true, ""),
+            agent("a/2", "task-open", vec![], true, ""),
+            agent("a/3", "task-progress", vec![], true, ""),
+            agent("a/4", "task-blocked", vec![], true, ""),
         ];
         let nodes = vec![
-            task_node("sys-run", "running", json!({"is_system": true})),
-            task_node("task-ready", "ready", json!({})),
-            task_node("task-running", "running", json!({})),
-            task_node("task-stuck", "stuck", json!({})),
+            task_node("sys-run", "hooked", json!({"is_system": true})),
+            task_node("task-open", "open", json!({})),
+            task_node("task-progress", "in_progress", json!({})),
+            task_node("task-blocked", "blocked", json!({})),
         ];
         let activity = build_activity_groups(&agents, &nodes, &BTreeMap::new());
         let order: Vec<&str> = activity.groups.iter().map(|g| g.task_id.as_str()).collect();
-        // Non-system first (running, stuck, ready), then system nodes.
+        // Non-system first in task_id order, then system nodes.
         assert_eq!(
             order,
-            vec!["task-running", "task-stuck", "task-ready", "sys-run"]
+            vec!["task-blocked", "task-open", "task-progress", "sys-run"]
         );
     }
 
@@ -6436,7 +6395,7 @@ mod build_activity_groups_tests {
         let long_events: Vec<Value> = (0..8).map(|i| json!({"i": i})).collect();
         let a1 = agent("a/1", "t", long_events.clone(), true, "");
         let a2 = agent("a/2", "t", long_events, true, "");
-        let nodes = vec![task_node("t", "running", json!({}))];
+        let nodes = vec![task_node("t", "hooked", json!({}))];
         let activity = build_activity_groups(&[a1, a2], &nodes, &BTreeMap::new());
         let group = &activity.groups[0];
         // Each agent's payload should have 6 events (tail of 8).

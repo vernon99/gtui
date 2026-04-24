@@ -34,7 +34,6 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "graph",
     "gt_root",
     "status",
-    "status_legend",
     "stores",
     "summary",
     "timings",
@@ -453,7 +452,6 @@ fn graph_node_inner_keys_match_contract() {
             "status",
             "title",
             "type",
-            "ui_status",
             "updated_at",
         ],
         "graph.nodes[0]",
@@ -491,7 +489,6 @@ fn activity_group_inner_keys_match_contract() {
             "stored_status",
             "task_id",
             "title",
-            "ui_status",
         ],
         "activity.groups[0]",
     );
@@ -499,19 +496,7 @@ fn activity_group_inner_keys_match_contract() {
 
 #[test]
 fn summary_carries_all_counter_fields() {
-    let expected = &[
-        "active_agents",
-        "command_errors",
-        "derived_status_counts",
-        "done_tasks",
-        "ready_tasks",
-        "repos",
-        "running_tasks",
-        "stored_status_counts",
-        "stuck_tasks",
-        "system_running",
-        "task_groups",
-    ];
+    let expected = &["active_agents", "command_errors", "repos", "task_groups"];
     for fixture in [POPULATED, EMPTY] {
         let snap = load_fixture_json(fixture);
         assert_keys_present(&snap["summary"], expected, &format!("{fixture}.summary"));
@@ -556,18 +541,6 @@ fn populated_summary_counters_are_internally_consistent() {
         active <= agents_total,
         "summary.active_agents ({active}) cannot exceed agents.len() ({agents_total})"
     );
-}
-
-#[test]
-fn status_legend_has_seven_entries_in_both_fixtures() {
-    for fixture in [POPULATED, EMPTY] {
-        let snap = load_fixture_json(fixture);
-        assert_eq!(
-            array_len(&snap, &["status_legend"]),
-            7,
-            "{fixture}.status_legend should have 7 entries (matches default_status_legend)"
-        );
-    }
 }
 
 #[test]

@@ -1,5 +1,5 @@
 import { esc } from "./renderers/html.js";
-import { hiddenCompletedTaskIdsFromSnapshot } from "./convoys.mjs";
+import { hiddenCompletedIdsFromSnapshot } from "./convoys.mjs";
 import { describeSnapshotHealth } from "./health.mjs";
 import {
   findSnapshotPrimaryTerminalAgent,
@@ -10,9 +10,6 @@ import {
   getTranscriptView,
   hasTranscriptItems,
   renderPrimaryTranscript,
-  transcriptBadgeText,
-  transcriptLabel,
-  transcriptTitleNoun,
 } from "./renderers/index.js";
 
     function syncWindowChrome() {
@@ -58,9 +55,10 @@ import {
       },
       suppressGraphClick: false,
       selectedNodeId: null,
+      selectionCleared: false,
       selectedScope: "all",
       includeSystem: false,
-      hideCompletedConvoys: true,
+      hideCompleted: "all",
       primaryInjectDraft: "",
       primarySending: false,
       gtControlInFlight: false,
@@ -123,8 +121,12 @@ import {
         panel.classList.toggle("active", active);
       });
       document.body.classList.toggle("mayor-tab-active", app.activeTab === "mayor");
+      document.body.classList.toggle("task-spine-tab-active", app.activeTab === "task-spine");
       if (app.activeTab === "mayor") {
         window.requestAnimationFrame(() => restorePrimaryLogState());
+      }
+      if (app.activeTab === "task-spine") {
+        window.requestAnimationFrame(updateGraphViewportMap);
       }
     }
 
@@ -163,25 +165,39 @@ import {
     }
 
     function nodeStatusOrder(status) {
-      return { running: 0, stuck: 1, ready: 2, ice: 3, done: 4, memory: 5 }[status] ?? 9;
+      return {
+        hooked: 0,
+        in_progress: 1,
+        blocked: 2,
+        open: 3,
+        deferred: 4,
+        pinned: 5,
+        closed: 6,
+        commit: 7,
+      }[status] ?? 9;
     }
 
     function exactStatusTone(status) {
       return {
-        hooked: "running",
-        in_progress: "running",
-        blocked: "stuck",
-        open: "ready",
-        closed: "done",
-        deferred: "ice",
-        pinned: "ice",
+        hooked: "hooked",
+        in_progress: "in_progress",
+        blocked: "blocked",
+        open: "open",
+        closed: "closed",
+        deferred: "deferred",
+        pinned: "pinned",
+        commit: "commit",
       }[status] || "";
     }
 
+    function gtNodeStatus(node) {
+      if (!node) return "";
+      if (node.kind === "commit") return "commit";
+      return node.status || "";
+    }
+
     function nodeTone(node) {
-      if (!node) return "ready";
-      if (node.kind === "commit") return "memory";
-      return exactStatusTone(node.status) || "ready";
+      return exactStatusTone(gtNodeStatus(node)) || "unknown";
     }
 
     function normalizeScope(scope) {
@@ -193,6 +209,28 @@ import {
     function matchesScope(scope) {
       if (app.selectedScope === "all") return true;
       return normalizeScope(scope) === app.selectedScope;
+    }
+
+    function nodeHasLabel(node, label) {
+      return (node.labels || []).some((value) => String(value) === label);
+    }
+
+    function isIdentityGraphNode(node) {
+      const description = String(node.description || "");
+      const normalizedDescription = description.trimStart().toLowerCase();
+      if (nodeHasLabel(node, "gt:rig")) return true;
+      if (
+        normalizedDescription.startsWith("rig identity bead for ")
+        || normalizedDescription.startsWith("polecat identity bead for ")
+      ) {
+        return true;
+      }
+      if (!nodeHasLabel(node, "gt:agent")) return false;
+      const id = String(node.id || "").toLowerCase();
+      const title = String(node.title || "").toLowerCase();
+      return /^role_type:\s*polecat\s*$/im.test(description)
+        || id.includes("-polecat-")
+        || title.includes("-polecat-");
     }
 
     function syncScopeSelector() {
@@ -239,12 +277,13 @@ import {
 
     function visibleGraphNodes() {
       const nodes = app.snapshot?.graph?.nodes || [];
-      const hiddenTasks = hiddenCompletedTaskIds();
+      const hiddenCompleted = hiddenCompletedIds();
       return nodes.filter((node) => {
+        if (isIdentityGraphNode(node)) return false;
         if (!matchesScope(node.scope)) return false;
         if (!(app.includeSystem || !node.is_system)) return false;
-        if (node.kind === "task" && hiddenTasks.has(node.id)) return false;
-        if (node.kind === "commit" && node.parent && hiddenTasks.has(node.parent)) return false;
+        if (node.kind === "task" && hiddenCompleted.has(node.id)) return false;
+        if (node.kind === "commit" && node.parent && hiddenCompleted.has(node.parent)) return false;
         return true;
       });
     }
@@ -283,12 +322,34 @@ import {
       });
     }
 
-    function hiddenCompletedTaskIds() {
-      return hiddenCompletedTaskIdsFromSnapshot(app.snapshot, app.hideCompletedConvoys);
+    function hiddenCompletedIds() {
+      return hiddenCompletedIdsFromSnapshot(app.snapshot, app.hideCompleted);
+    }
+
+    function hiddenCompletedVisibleNodeCount(hiddenCompleted) {
+      const nodes = app.snapshot?.graph?.nodes || [];
+      return nodes.filter((node) => {
+        if (isIdentityGraphNode(node)) return false;
+        if (!matchesScope(node.scope)) return false;
+        if (!(app.includeSystem || !node.is_system)) return false;
+        if (node.kind === "task" && hiddenCompleted.has(node.id)) return true;
+        return node.kind === "commit" && node.parent && hiddenCompleted.has(node.parent);
+      }).length;
     }
 
     function filteredTaskNodes() {
       return visibleGraphNodes().filter((node) => node.kind === "task" && !node.is_system);
+    }
+
+    function visibleTaskStatusCounts() {
+      const counts = {};
+      filteredTaskNodes().forEach((task) => {
+        const status = String(task.status || "");
+        counts[status] = (counts[status] || 0) + 1;
+      });
+      return Object.entries(counts).sort(([a], [b]) => {
+        return nodeStatusOrder(a) - nodeStatusOrder(b) || a.localeCompare(b);
+      });
     }
 
     function getFilteredSummary() {
@@ -371,7 +432,7 @@ import {
         const fallbackTaskId = taskId ? "" : (recentTask?.task_id || "");
         const fallbackNode = fallbackTaskId ? nodeMap.get(fallbackTaskId) : null;
         const taskTitle = node?.title || hook.title || "";
-        const taskDerived = node?.ui_status || (taskId ? "running" : "");
+        const taskStatus = taskId ? (node?.status || hook.status || "") : "";
         const taskStored = taskId ? (node?.status || hook.status || "") : "";
         const isSystem = Boolean(node?.is_system || (hook.title || "").startsWith("mol-"));
         const lastEvent = (agent.events || []).at(-1) || null;
@@ -380,7 +441,7 @@ import {
           ...agent,
           taskId,
           taskTitle,
-          taskDerived,
+          taskStatus,
           taskStored,
           isSystem,
           fallbackTaskId,
@@ -399,8 +460,8 @@ import {
           b.has_session ? 1 :
           2;
         return aRank - bRank
-          || nodeStatusOrder(a.taskDerived || "")
-          - nodeStatusOrder(b.taskDerived || "")
+          || nodeStatusOrder(a.taskStatus || "")
+          - nodeStatusOrder(b.taskStatus || "")
           || a.target.localeCompare(b.target);
       });
     }
@@ -426,26 +487,6 @@ import {
         events: live.events || agent.events,
         log_lines: live.log_lines || [],
       };
-    }
-
-    function terminalHeading(agent) {
-      if (!agent) return "No primary terminal available";
-      if (agent.role === "mayor") return "Mayor Terminal";
-      if (agent.role === "deacon") return "Deacon Terminal";
-      if (agent.role === "witness") return `${agent.scope || "Rig"} Witness Terminal`;
-      if (agent.role === "refinery") return `${agent.scope || "Rig"} Refinery Terminal`;
-      if (agent.role === "crew") return `${agent.scope || "Rig"} Crew Terminal`;
-      if (agent.role === "polecat") return `${agent.scope || "Rig"} Polecat Terminal`;
-      return `${agent.target} Terminal`;
-    }
-
-    function primarySurfaceHeading(agent) {
-      if (!agent) return "No primary view available";
-      const transcriptView = getTranscriptView(agent);
-      if (hasTranscriptItems(transcriptView)) {
-        return terminalHeading(agent).replace("Terminal", transcriptTitleNoun(transcriptView));
-      }
-      return terminalHeading(agent);
     }
 
     function buildPrimaryTerminalDataKey(agent) {
@@ -533,16 +574,20 @@ import {
       const nodes = visibleGraphNodes();
       if (!nodes.length) {
         app.selectedNodeId = null;
+        app.selectionCleared = false;
         return;
       }
       const map = new Set(nodes.map((node) => node.id));
       if (app.selectedNodeId && map.has(app.selectedNodeId)) return;
+      if (!app.selectedNodeId && app.selectionCleared) return;
       const next =
-        nodes.find((node) => node.ui_status === "running" && node.kind === "task") ||
-        nodes.find((node) => node.ui_status === "stuck" && node.kind === "task") ||
+        nodes.find((node) => node.status === "hooked" && node.kind === "task") ||
+        nodes.find((node) => node.status === "in_progress" && node.kind === "task") ||
+        nodes.find((node) => node.status === "blocked" && node.kind === "task") ||
         nodes.find((node) => node.kind === "task") ||
         nodes[0];
       app.selectedNodeId = next.id;
+      app.selectionCleared = false;
     }
 
     function renderMetrics() {
@@ -570,16 +615,131 @@ import {
       `;
     }
 
+    function graphEdgePath(source, target) {
+      const startX = source.x + source.width;
+      const startY = source.y + source.height / 2;
+      const endX = target.x;
+      const endY = target.y + target.height / 2;
+      const delta = Math.max(60, (endX - startX) * 0.45);
+      return `M ${startX} ${startY} C ${startX + delta} ${startY}, ${endX - delta} ${endY}, ${endX} ${endY}`;
+    }
+
+    function renderGraphMapPreview(nodes, edges, positions, width, height) {
+      const preview = document.getElementById("graph-map-preview");
+      if (!preview) return;
+      preview.setAttribute("viewBox", `0 0 ${width} ${height}`);
+      preview.setAttribute("preserveAspectRatio", "none");
+
+      const edgeHtml = edges
+        .filter((edge) => positions.has(edge.source) && positions.has(edge.target))
+        .map((edge) => {
+          const source = positions.get(edge.source);
+          const target = positions.get(edge.target);
+          return `<path class="graph-map-edge ${esc(edge.kind)}" d="${graphEdgePath(source, target)}"></path>`;
+        })
+        .join("");
+      const nodeHtml = nodes.map((node) => {
+        const pos = positions.get(node.id);
+        const statusCls = nodeTone(node);
+        const selectedCls = node.id === app.selectedNodeId ? "selected" : "";
+        const rx = node.kind === "commit" ? pos.height / 2 : 14;
+        return `
+          <rect
+            class="graph-map-node ${esc(node.kind)} ${esc(statusCls)} ${selectedCls}"
+            x="${pos.x}"
+            y="${pos.y}"
+            width="${pos.width}"
+            height="${pos.height}"
+            rx="${rx}"
+          ></rect>
+        `;
+      }).join("");
+      preview.innerHTML = `${edgeHtml}${nodeHtml}`;
+    }
+
+    function updateGraphViewportMap() {
+      const wrap = document.querySelector(".graph-wrap");
+      const stage = document.getElementById("graph-stage");
+      const map = document.getElementById("graph-viewport-map");
+      const content = document.getElementById("graph-map-content");
+      const view = document.getElementById("graph-map-view");
+      if (!wrap || !stage || !map || !content || !view) return;
+
+      const contentWidth = stage.offsetWidth || wrap.scrollWidth || 0;
+      const contentHeight = stage.offsetHeight || wrap.scrollHeight || 0;
+      const viewportWidth = wrap.clientWidth || 0;
+      const viewportHeight = wrap.clientHeight || 0;
+      const needsMap = contentWidth > 0
+        && contentHeight > 0
+        && (contentWidth > viewportWidth + 2 || contentHeight > viewportHeight + 2);
+      map.hidden = !needsMap;
+      if (!needsMap) return;
+
+      const surfaceAspect = contentWidth / contentHeight;
+      const mapInset = 4;
+      const maxOuterWidth = Math.min(156, Math.max(96, viewportWidth * 0.24));
+      const maxOuterHeight = Math.min(108, Math.max(72, viewportHeight * 0.24));
+      const maxMapWidth = Math.max(40, maxOuterWidth - mapInset * 2);
+      const maxMapHeight = Math.max(40, maxOuterHeight - mapInset * 2);
+      let mapWidth = maxMapWidth;
+      let mapHeight = mapWidth / surfaceAspect;
+      if (mapHeight > maxMapHeight) {
+        mapHeight = maxMapHeight;
+        mapWidth = mapHeight * surfaceAspect;
+      }
+      mapWidth = Math.round(mapWidth);
+      mapHeight = Math.round(mapHeight);
+      const scaleX = mapWidth / contentWidth;
+      const scaleY = mapHeight / contentHeight;
+
+      map.style.width = `${mapWidth + mapInset * 2}px`;
+      map.style.height = `${mapHeight + mapInset * 2}px`;
+      content.style.width = `${mapWidth}px`;
+      content.style.height = `${mapHeight}px`;
+      content.style.transform = `translate(${mapInset}px, ${mapInset}px)`;
+      const viewWidth = Math.min(mapWidth, Math.max(10, Math.round(viewportWidth * scaleX)));
+      const viewHeight = Math.min(mapHeight, Math.max(10, Math.round(viewportHeight * scaleY)));
+      const viewX = Math.min(Math.max(0, mapWidth - viewWidth), Math.max(0, Math.round(wrap.scrollLeft * scaleX)));
+      const viewY = Math.min(Math.max(0, mapHeight - viewHeight), Math.max(0, Math.round(wrap.scrollTop * scaleY)));
+      view.style.width = `${viewWidth}px`;
+      view.style.height = `${viewHeight}px`;
+      view.style.transform = `translate(${viewX}px, ${viewY}px)`;
+    }
+
+    function centerGraphAtMinimapPoint(event) {
+      const wrap = document.querySelector(".graph-wrap");
+      const stage = document.getElementById("graph-stage");
+      const content = document.getElementById("graph-map-content");
+      if (!wrap || !stage || !content) return;
+      const rect = content.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+
+      const localX = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+      const localY = Math.max(0, Math.min(rect.height, event.clientY - rect.top));
+      const contentWidth = stage.offsetWidth || wrap.scrollWidth || 0;
+      const contentHeight = stage.offsetHeight || wrap.scrollHeight || 0;
+      const graphX = (localX / rect.width) * contentWidth;
+      const graphY = (localY / rect.height) * contentHeight;
+      const maxLeft = Math.max(0, wrap.scrollWidth - wrap.clientWidth);
+      const maxTop = Math.max(0, wrap.scrollHeight - wrap.clientHeight);
+      wrap.scrollLeft = Math.max(0, Math.min(maxLeft, graphX - wrap.clientWidth / 2));
+      wrap.scrollTop = Math.max(0, Math.min(maxTop, graphY - wrap.clientHeight / 2));
+      updateGraphViewportMap();
+    }
+
     function initGraphPan() {
       const wrap = document.querySelector(".graph-wrap");
       if (!wrap || wrap.dataset.panReady === "1") return;
       wrap.dataset.panReady = "1";
+      const map = document.getElementById("graph-viewport-map");
 
       const endPan = (event) => {
         const pan = app.graphPan;
         if (!pan.active) return;
         if (event && event.pointerId !== undefined && pan.pointerId !== null && event.pointerId !== pan.pointerId) return;
-        const shouldSelectNode = Boolean(event && event.type === "pointerup" && !pan.moved && pan.downNodeId);
+        const isClick = Boolean(event && event.type === "pointerup" && !pan.moved);
+        const shouldSelectNode = Boolean(isClick && pan.downNodeId);
+        const shouldClearSelection = Boolean(isClick && !pan.downNodeId && app.selectedNodeId);
         const nodeId = pan.downNodeId;
         if (pan.pointerId !== null && wrap.releasePointerCapture) {
           try {
@@ -597,6 +757,11 @@ import {
         pan.downNodeId = "";
         if (shouldSelectNode && nodeId) {
           app.selectedNodeId = nodeId;
+          app.selectionCleared = false;
+          renderAll();
+        } else if (shouldClearSelection) {
+          app.selectedNodeId = null;
+          app.selectionCleared = true;
           renderAll();
         }
       };
@@ -615,6 +780,7 @@ import {
         pan.moved = false;
         pan.downNodeId = nodeTarget?.dataset.nodeId || "";
         wrap.classList.add("dragging");
+        event.preventDefault();
         if (wrap.setPointerCapture) {
           try {
             wrap.setPointerCapture(event.pointerId);
@@ -629,16 +795,52 @@ import {
         const dy = event.clientY - pan.startY;
         if (!pan.moved && Math.hypot(dx, dy) > 4) {
           pan.moved = true;
+          window.getSelection()?.removeAllRanges();
         }
         if (!pan.moved) return;
+        event.preventDefault();
         wrap.scrollLeft = pan.startScrollLeft - dx;
         wrap.scrollTop = pan.startScrollTop - dy;
         app.suppressGraphClick = true;
+        updateGraphViewportMap();
       });
 
+      wrap.addEventListener("scroll", updateGraphViewportMap, { passive: true });
       wrap.addEventListener("pointerup", endPan);
       wrap.addEventListener("pointercancel", endPan);
       wrap.addEventListener("lostpointercapture", endPan);
+
+      if (map && map.dataset.centerReady !== "1") {
+        map.dataset.centerReady = "1";
+        let mapPointerId = null;
+        const endMapPointer = () => {
+          mapPointerId = null;
+        };
+        map.addEventListener("pointerdown", (event) => {
+          if (event.button !== 0) return;
+          mapPointerId = event.pointerId;
+          centerGraphAtMinimapPoint(event);
+          event.preventDefault();
+          event.stopPropagation();
+          if (map.setPointerCapture) {
+            try {
+              map.setPointerCapture(event.pointerId);
+            } catch {}
+          }
+        });
+        map.addEventListener("pointermove", (event) => {
+          if (mapPointerId !== event.pointerId) return;
+          centerGraphAtMinimapPoint(event);
+          event.preventDefault();
+          event.stopPropagation();
+        });
+        map.addEventListener("pointerup", endMapPointer);
+        map.addEventListener("pointercancel", endMapPointer);
+        map.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        });
+      }
     }
 
     function capturePrimaryLogState() {
@@ -703,7 +905,6 @@ import {
 
     function renderPrimaryTerminal() {
       const host = document.getElementById("primary-terminal");
-      const summaryHost = document.getElementById("primary-terminal-summary");
       capturePrimaryLogState();
       captureTmuxLogStates(host);
       const composerState = capturePrimaryComposerState();
@@ -732,9 +933,6 @@ import {
 
       if (!targetAgent) {
         app.primaryTerminalRenderedKey = `none::${scopeLabel}::${serviceNotes.join("|")}`;
-        summaryHost.textContent = snapshotIsDegraded
-          ? `${scopeLabel} · controller terminal temporarily unavailable while the snapshot is degraded${serviceNotes.length ? ` · ${serviceNotes.join(" · ")}` : ""}`
-          : `${scopeLabel} · no controller terminal visible${serviceNotes.length ? ` · ${serviceNotes.join(" · ")}` : ""}`;
         host.innerHTML = `
           <div class="empty">
             ${snapshotIsDegraded
@@ -749,7 +947,6 @@ import {
 
       if (!agent) {
         app.primaryTerminalRenderedKey = `loading::${targetAgent.target || ""}::${scopeLabel}::${serviceNotes.join("|")}`;
-        summaryHost.textContent = `${targetAgent.target} · ${targetAgent.role} · loading terminal state · ${scopeLabel}${serviceNotes.length ? ` · ${serviceNotes.join(" · ")}` : ""}${fallbackNote ? ` · ${fallbackNote}` : ""}`;
         host.innerHTML = `
           <div class="empty">
             Loading primary terminal state for ${esc(targetAgent.target)}.
@@ -759,7 +956,6 @@ import {
         return;
       }
 
-      const hookState = formatHookState(agent.hook?.status || "");
       const transcriptView = getTranscriptView(agent);
       const usesTranscript = hasTranscriptItems(transcriptView);
       const terminalText = agent.log_lines?.length
@@ -775,43 +971,21 @@ import {
                 : "No pane log stream available for this terminal right now."));
       app.primaryTerminalRenderedKey = buildPrimaryTerminalDataKey(agent);
 
-      summaryHost.textContent = `${agent.target} · ${agent.role} · ${usesTranscript ? transcriptLabel(transcriptView) : "terminal"} · ${scopeLabel}${serviceNotes.length ? ` · ${serviceNotes.join(" · ")}` : ""}${fallbackNote ? ` · ${fallbackNote}` : ""}`;
       host.innerHTML = `
-        <div class="terminal-shell">
-          <div class="card mayor-terminal-card">
-            <div class="agent-top">
-              <div>
-                <div class="feed-title">${esc(primarySurfaceHeading(agent))}</div>
-                <div class="subtle">${esc(agent.target)} ${usesTranscript && transcriptView.session_name ? `· ${esc(transcriptView.session_name)}` : (agent.session_name ? `· ${esc(agent.session_name)}` : "")}</div>
-              </div>
-              <div class="tiny-actions">
-                <button type="button" data-pause-agent="${esc(agent.target)}">Pause</button>
-                <button type="button" data-focus-primary-inject="${esc(agent.target)}">Write</button>
-              </div>
-            </div>
-            <div class="node-meta" style="margin-top: 12px;">
-              <span class="chip ${agent.has_session ? "running" : ""}">${agent.has_session ? "session live" : "no session"}</span>
-              <span class="chip ${esc(exactStatusTone(agent.hook?.status || ""))}">${esc(hookState || "no hook")}</span>
-              ${agent.current_command ? `<span class="chip">${esc(agent.current_command)}</span>` : ""}
-              ${agent.scope ? `<span class="chip">${esc(agent.scope)}</span>` : ""}
-              ${usesTranscript ? `<span class="chip memory">${esc(transcriptBadgeText(transcriptView))}</span>` : ""}
-              ${usesTranscript && transcriptView.updated_at ? `<span class="chip">${esc(timeAgo(transcriptView.updated_at))}</span>` : ""}
-              ${agent.log_lines?.length && !usesTranscript ? `<span class="chip">history ${esc(agent.log_lines.length)} lines</span>` : ""}
-            </div>
-            ${usesTranscript
-              ? renderPrimaryTranscript(transcriptView, { openDetails: app.openDetails })
-              : `<pre id="primary-terminal-log" class="log-block primary-log-block" style="margin-top:12px;">${esc(terminalText)}</pre>`}
-            <div class="stack primary-composer" style="margin-top:12px;">
-              <label class="subtle" for="primary-inject-message">Write to ${esc(agent.target)}</label>
-              <textarea
-                id="primary-inject-message"
-                data-primary-target="${esc(agent.target)}"
-                placeholder="Write directly to this terminal target. Enter sends. Cmd/Ctrl+Enter adds a new line."
-                ${agent.has_session ? "" : "disabled"}
-              >${esc(app.primaryInjectDraft)}</textarea>
-              <div class="tiny-actions">
-                <button type="button" id="primary-inject-submit" data-primary-target="${esc(agent.target)}" ${(agent.has_session && !app.primarySending) ? "" : "disabled"}>${app.primarySending ? "Sending…" : "Send to terminal"}</button>
-              </div>
+        <div class="mayor-terminal-surface">
+          ${usesTranscript
+            ? renderPrimaryTranscript(transcriptView, { openDetails: app.openDetails })
+            : `<pre id="primary-terminal-log" class="log-block primary-log-block">${esc(terminalText)}</pre>`}
+          <div class="stack primary-composer">
+            <textarea
+              id="primary-inject-message"
+              data-primary-target="${esc(agent.target)}"
+              placeholder="Message ${esc(agent.target)}"
+              ${agent.has_session ? "" : "disabled"}
+            >${esc(app.primaryInjectDraft)}</textarea>
+            <div class="primary-composer-actions">
+              <button type="button" id="primary-inject-submit" data-primary-target="${esc(agent.target)}" ${(agent.has_session && !app.primarySending) ? "" : "disabled"}>${app.primarySending ? "Sending..." : "Send"}</button>
+              <button type="button" data-pause-agent="${esc(agent.target)}">Pause</button>
             </div>
           </div>
         </div>
@@ -887,9 +1061,9 @@ import {
         if (node.priority !== null && node.priority !== undefined) chips.push(`<span class="chip">P${esc(node.priority)}</span>`);
         if (node.type) chips.push(`<span class="chip">${esc(node.type)}</span>`);
         if (node.agent_targets?.length) chips.push(`<span class="chip">${esc(node.agent_targets.length)} agent${node.agent_targets.length === 1 ? "" : "s"}</span>`);
-        if (node.linked_commit_count) chips.push(`<span class="chip memory">${esc(node.linked_commit_count)} commit${node.linked_commit_count === 1 ? "" : "s"}</span>`);
+        if (node.linked_commit_count) chips.push(`<span class="chip commit">${esc(node.linked_commit_count)} commit${node.linked_commit_count === 1 ? "" : "s"}</span>`);
       } else {
-        chips.push(`<span class="chip memory">${esc(node.short_sha || "commit")}</span>`);
+        chips.push(`<span class="chip commit">${esc(node.short_sha || "commit")}</span>`);
         if (node.available_local) chips.push(`<span class="chip">local diff</span>`);
       }
 
@@ -955,7 +1129,7 @@ import {
           return [...rankIds].sort((a, b) => {
             const na = nodeMap.get(a);
             const nb = nodeMap.get(b);
-            return nodeStatusOrder(na.ui_status) - nodeStatusOrder(nb.ui_status) || a.localeCompare(b);
+            return nodeStatusOrder(gtNodeStatus(na)) - nodeStatusOrder(gtNodeStatus(nb)) || a.localeCompare(b);
           });
         }
         return [...rankIds].sort((a, b) => {
@@ -966,7 +1140,7 @@ import {
           if (aY !== bY) return aY - bY;
           const na = nodeMap.get(a);
           const nb = nodeMap.get(b);
-          return nodeStatusOrder(na.ui_status) - nodeStatusOrder(nb.ui_status) || a.localeCompare(b);
+          return nodeStatusOrder(gtNodeStatus(na)) - nodeStatusOrder(gtNodeStatus(nb)) || a.localeCompare(b);
         });
       };
 
@@ -1054,9 +1228,10 @@ import {
       const nodes = visibleGraphNodes();
       const edges = app.snapshot?.graph?.edges || [];
       const graphSummary = document.getElementById("graph-summary");
-      const hiddenCompletedTasks = hiddenCompletedTaskIds();
-      graphSummary.textContent = app.hideCompletedConvoys && hiddenCompletedTasks.size
-        ? `${nodes.length} visible nodes · ${hiddenCompletedTasks.size} completed task${hiddenCompletedTasks.size === 1 ? "" : "s"} hidden`
+      const hiddenCompleted = hiddenCompletedIds();
+      const hiddenCompletedCount = hiddenCompletedVisibleNodeCount(hiddenCompleted);
+      graphSummary.textContent = app.hideCompleted !== "none" && hiddenCompletedCount
+        ? `${nodes.length} visible nodes · ${hiddenCompletedCount} completed item${hiddenCompletedCount === 1 ? "" : "s"} hidden`
         : `${nodes.length} visible nodes`;
 
       const stage = document.getElementById("graph-stage");
@@ -1068,11 +1243,16 @@ import {
         stage.style.height = "560px";
         svg.innerHTML = "";
         nodesHost.innerHTML = `<div class="empty" style="margin: 18px;">No graph nodes match the current filter.</div>`;
+        const map = document.getElementById("graph-viewport-map");
+        if (map) map.hidden = true;
+        const preview = document.getElementById("graph-map-preview");
+        if (preview) preview.innerHTML = "";
         return;
       }
 
       const metrics = estimateNodeMetrics(nodes);
       const { positions, width, height } = computeLayout(nodes, edges, metrics);
+      renderGraphMapPreview(nodes, edges, positions, width, height);
       stage.style.width = `${width}px`;
       stage.style.height = `${height}px`;
       svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
@@ -1091,15 +1271,9 @@ import {
         .map((edge) => {
           const source = positions.get(edge.source);
           const target = positions.get(edge.target);
-          const startX = source.x + source.width;
-          const startY = source.y + source.height / 2;
-          const endX = target.x;
-          const endY = target.y + target.height / 2;
-          const delta = Math.max(60, (endX - startX) * 0.45);
-          const path = `M ${startX} ${startY} C ${startX + delta} ${startY}, ${endX - delta} ${endY}, ${endX} ${endY}`;
           const active = edge.source === selected || edge.target === selected;
           const muted = selected && !active;
-          return `<path class="graph-edge ${esc(edge.kind)} ${active ? "active" : ""} ${muted ? "muted" : ""}" d="${path}"></path>`;
+          return `<path class="graph-edge ${esc(edge.kind)} ${active ? "active" : ""} ${muted ? "muted" : ""}" d="${graphEdgePath(source, target)}"></path>`;
         })
         .join("");
 
@@ -1119,13 +1293,14 @@ import {
           </button>
         `;
       }).join("");
+      window.requestAnimationFrame(updateGraphViewportMap);
     }
 
     function renderFocus() {
       const host = document.getElementById("focus-panel");
       const node = getSelectedNode();
       if (!node) {
-        host.innerHTML = `<div class="empty">Select a graph node to inspect task state, memory, and controls.</div>`;
+        host.innerHTML = `<div class="empty">Select a graph node to inspect task state, linked commits, and controls.</div>`;
         return;
       }
 
@@ -1139,7 +1314,7 @@ import {
       const selectedAgents = agents.length
         ? agents
         : (node.kind === "commit" ? [] : []);
-      const canRetry = isTask && !node.is_system && (node.status === "hooked" || node.status === "in_progress" || node.ui_status === "running");
+      const canRetry = isTask && !node.is_system && (node.status === "hooked" || node.status === "in_progress");
       const defaultTarget = selectedAgents[0]?.target || "";
       const globalTargets = scopedAgents.filter((agent) => agent.has_session).map((agent) => agent.target);
       const targetOptions = [...new Set([defaultTarget, ...globalTargets].filter(Boolean))];
@@ -1149,7 +1324,7 @@ import {
             <div class="memory-row">
               <div class="memory-top">
                 <div>
-                  <div><strong>${esc(entry.short_sha || "memory")}</strong> ${entry.branch ? `· ${esc(entry.branch)}` : ""}</div>
+                  <div><strong>${esc(entry.short_sha || "commit")}</strong> ${entry.branch ? `· ${esc(entry.branch)}` : ""}</div>
                   <div class="subtle">${esc(entry.source)} ${entry.repo_label ? `· ${entry.repo_label}` : ""}</div>
                 </div>
                 ${entry.repo_id ? `<button type="button" data-diff-repo="${esc(entry.repo_id)}" data-diff-sha="${esc(entry.sha)}">Load diff</button>` : ""}
@@ -1157,7 +1332,7 @@ import {
               <div>${esc(entry.subject || "(no subject)")}</div>
             </div>
           `).join("")
-        : `<div class="empty">No task-linked git memory yet.</div>`;
+        : `<div class="empty">No linked commits yet.</div>`;
 
       const agentRows = selectedAgents.length
         ? selectedAgents.map((agent) => `
@@ -1183,27 +1358,43 @@ import {
         node.scope ? `<span class="chip">${esc(node.scope)}</span>` : "",
         node.priority !== null && node.priority !== undefined ? `<span class="chip">P${esc(node.priority)}</span>` : "",
         node.assignee ? `<span class="chip">${esc(node.assignee)}</span>` : "",
-        node.linked_commit_count ? `<span class="chip memory">${esc(node.linked_commit_count)} linked commits</span>` : "",
+        node.linked_commit_count ? `<span class="chip commit">${esc(node.linked_commit_count)} linked commits</span>` : "",
       ].filter(Boolean).join("");
+      const descriptionKey = `focus-description:${node.id}`;
+      const descriptionOpen = app.openDetails.has(descriptionKey);
+      const descriptionHtml = node.description
+        ? `
+          <div class="focus-description-details ${descriptionOpen ? "open" : ""}">
+            <div class="focus-description-summary">
+              <span>Description</span>
+              <div class="codex-inline-right">
+                <button
+                  type="button"
+                  class="codex-inline-toggle"
+                  data-inline-toggle="${esc(descriptionKey)}"
+                  aria-expanded="${descriptionOpen ? "true" : "false"}"
+                  aria-label="${descriptionOpen ? "Collapse description" : "Expand description"}"
+                ><span class="codex-inline-chevron" aria-hidden="true">▸</span></button>
+              </div>
+            </div>
+            ${descriptionOpen ? `<div class="focus-description">${esc(node.description)}</div>` : ""}
+          </div>
+        `
+        : "";
 
       host.innerHTML = `
-        <div class="card">
+        <div class="card focus-summary-card">
           <h3>${esc(node.kind === "commit" ? "Commit Focus" : "Task Focus")}</h3>
           <div class="focus-title">${esc(node.title)}</div>
-          <div class="subtle mono" style="margin-top:8px;">${esc(node.kind === "commit" ? node.id : node.id)}</div>
-          <div class="node-meta" style="margin-top:12px;">${detailRows}</div>
-        </div>
-
-        <div class="card">
-          <h3>Description</h3>
-          <div class="focus-description">${esc(node.description || "No description recorded.")}</div>
+          <div class="subtle mono focus-id">${esc(node.id)}</div>
+          <div class="node-meta focus-meta">${detailRows}</div>
+          ${descriptionHtml}
         </div>
 
         <div class="card">
           <h3>Intervention</h3>
           <div class="stack">
             <button type="button" data-retry-task="${esc(node.id)}" ${canRetry ? "" : "disabled"}>Retry task</button>
-            <div class="subtle">${canRetry ? "Uses safe reset primitives only." : "Retry is enabled only for non-system running tasks."}</div>
             <div class="stack">
               <label class="subtle" for="inject-target">Inject target</label>
               <select id="inject-target">
@@ -1226,7 +1417,7 @@ import {
         </div>
 
         <div class="card">
-          <h3>Task Memory</h3>
+          <h3>Linked Commits</h3>
           <div class="stack">${memoryRows}</div>
         </div>
       `;
@@ -1291,7 +1482,7 @@ import {
               </div>
               <div class="node-meta">
                 <span class="chip">${esc(group.agent_count)} agent${group.agent_count === 1 ? "" : "s"}</span>
-                ${group.memory?.length ? `<span class="chip memory">${esc(group.memory.length)} memory link${group.memory.length === 1 ? "" : "s"}</span>` : ""}
+                ${group.memory?.length ? `<span class="chip commit">${esc(group.memory.length)} commit link${group.memory.length === 1 ? "" : "s"}</span>` : ""}
                 ${group.is_system ? `<span class="chip">system</span>` : ""}
               </div>
             </div>
@@ -1479,7 +1670,7 @@ import {
 
       const memoryBlock = `
         <div class="card">
-          <h3>Selected Task Memory</h3>
+          <h3>Linked Commits</h3>
           <div class="stack">
             ${taskId
               ? (taskMemory.length
@@ -1487,7 +1678,7 @@ import {
                       <div class="memory-row">
                         <div class="memory-top">
                           <div>
-                            <div><strong>${esc(entry.short_sha || "memory")}</strong> ${entry.branch ? `· ${esc(entry.branch)}` : ""}</div>
+                            <div><strong>${esc(entry.short_sha || "commit")}</strong> ${entry.branch ? `· ${esc(entry.branch)}` : ""}</div>
                             <div class="subtle">${esc(entry.source)} ${entry.repo_label ? `· ${esc(entry.repo_label)}` : ""}</div>
                           </div>
                           ${entry.repo_id ? `<button type="button" data-diff-repo="${esc(entry.repo_id)}" data-diff-sha="${esc(entry.sha)}">Load diff</button>` : ""}
@@ -1495,8 +1686,8 @@ import {
                         <div>${esc(entry.subject || "(no subject)")}</div>
                       </div>
                     `).join("")
-                  : `<div class="empty">No commit lineage or merge memory attached to ${esc(taskId)}.</div>`)
-              : `<div class="empty">Select a task or commit node to inspect task-linked git memory.</div>`}
+                  : `<div class="empty">No linked commits attached to ${esc(taskId)}.</div>`)
+              : `<div class="empty">Select a task or commit node to inspect linked commits.</div>`}
           </div>
         </div>
       `;
@@ -1675,29 +1866,15 @@ import {
         : `<div class="empty">No bead stores discovered.</div>`;
 
       const statusHost = document.getElementById("status-panel");
-      const visibleTasks = filteredTaskNodes();
-      const storedCounts = {};
-      visibleTasks.forEach((task) => {
-        storedCounts[task.status] = (storedCounts[task.status] || 0) + 1;
-      });
+      const statusCounts = visibleTaskStatusCounts();
       statusHost.innerHTML = `
         <div class="card">
           <h3>Visible Task Statuses</h3>
           <div class="node-meta">
-            ${Object.entries(storedCounts).length
-              ? Object.entries(storedCounts).map(([key, value]) => `<span class="chip ${esc(exactStatusTone(key))}">${esc(key)} ${esc(value)}</span>`).join("")
+            ${statusCounts.length
+              ? statusCounts.map(([key, value]) => `<span class="chip ${esc(exactStatusTone(key))}">${esc(key || "unknown")} ${esc(value)}</span>`).join("")
               : `<span class="chip">No visible task nodes</span>`}
           </div>
-        </div>
-        <div class="stack">
-          ${(snapshot.status_legend || []).map((item) => `
-            <div class="memory-row">
-              <div class="memory-top">
-                <div><strong>${esc(item.icon)} ${esc(item.name)}</strong></div>
-              </div>
-              <div>${esc(item.meaning)}</div>
-            </div>
-          `).join("")}
         </div>
       `;
 
@@ -1736,6 +1913,31 @@ returncode: ${esc(error.returncode ?? "")}</pre>
         `${snapshot.status?.town || "Town"} · ${scopeLabel} · ${snapshot.status?.overseer || "no overseer parsed"}`;
       document.getElementById("footer-left").textContent =
         `Polling every ${SNAPSHOT_POLL_MS / 1000}s · gt ${snapshot.timings?.gt_commands_ms || 0} ms · agents ${snapshot.timings?.agent_commands_ms || 0} ms · bd ${snapshot.timings?.bd_commands_ms || 0} ms · git ${snapshot.timings?.git_commands_ms || 0} ms`;
+      renderTaskSpineLegend();
+    }
+
+    function renderTaskSpineLegend() {
+      const host = document.getElementById("task-spine-legend-body");
+      if (!host) return;
+      const statusCounts = visibleTaskStatusCounts();
+      const statusRows = statusCounts.map(([status, count]) => `
+        <tr>
+          <td><span class="chip ${esc(exactStatusTone(status))}">${esc(status || "unknown")}</span></td>
+          <td>${esc(count)} visible task node${count === 1 ? "" : "s"} with this raw GT status.</td>
+        </tr>
+      `).join("");
+      const memoryRow = `
+        <tr>
+          <td><span class="chip commit">linked commit</span></td>
+          <td>Commit node linked to GT tasks; not a GT task status.</td>
+        </tr>
+      `;
+      host.innerHTML = statusRows ? `${statusRows}${memoryRow}` : `
+        <tr>
+          <td><span class="chip">empty</span></td>
+          <td>No raw GT statuses on visible task nodes.</td>
+        </tr>
+      `;
     }
 
     function getSnapshotHealth(snapshot) {
@@ -1820,7 +2022,6 @@ returncode: ${esc(error.returncode ?? "")}</pre>
           </div>
         </div>
       `;
-      document.getElementById("primary-terminal-summary").textContent = "Waiting for first snapshot";
       document.getElementById("primary-terminal").innerHTML = `<div class="empty loading-empty">Terminal surfaces will appear after the first live poll finishes.</div>`;
       document.getElementById("graph-summary").textContent = "loading";
       document.getElementById("graph-svg").innerHTML = "";
@@ -1833,7 +2034,7 @@ returncode: ${esc(error.returncode ?? "")}</pre>
       document.getElementById("feed-summary").textContent = "loading";
       document.getElementById("feed-list").innerHTML = `<div class="empty loading-empty">Swarm activity is loading.</div>`;
       document.getElementById("git-summary").textContent = "loading";
-      document.getElementById("git-panel").innerHTML = `<div class="empty loading-empty">Git memory is loading.</div>`;
+      document.getElementById("git-panel").innerHTML = `<div class="empty loading-empty">Git history is loading.</div>`;
       document.getElementById("crew-summary").textContent = "loading";
       document.getElementById("crew-panel").innerHTML = `<div class="empty loading-empty">Crew workspaces are loading.</div>`;
       document.getElementById("stores-summary").textContent = "loading";
@@ -1843,6 +2044,7 @@ returncode: ${esc(error.returncode ?? "")}</pre>
       document.getElementById("raw-vitals").textContent = "Waiting for gt vitals output...";
       document.getElementById("mayor-events-panel").innerHTML = `<div class="empty loading-empty">Mayor events are loading.</div>`;
       document.getElementById("alerts-panel").innerHTML = `<div class="empty loading-empty">Attention items are loading.</div>`;
+      renderTaskSpineLegend(snapshot || {});
       renderActions(snapshot?.actions || []);
       renderErrors([]);
       updateControlSurfaceState(snapshot || {});
@@ -2045,8 +2247,8 @@ returncode: ${esc(error.returncode ?? "")}</pre>
       ensureSelection();
       renderAll();
     });
-    document.getElementById("hide-completed-convoys").addEventListener("change", (event) => {
-      app.hideCompletedConvoys = event.target.checked;
+    document.getElementById("hide-completed").addEventListener("change", (event) => {
+      app.hideCompleted = event.target.value;
       ensureSelection();
       renderAll();
     });
@@ -2134,6 +2336,7 @@ returncode: ${esc(error.returncode ?? "")}</pre>
       fetchPrimaryTerminal(true);
       fetchSnapshot(false);
     });
+    window.addEventListener("resize", () => window.requestAnimationFrame(updateGraphViewportMap));
 
     document.addEventListener("click", async (event) => {
       if (app.suppressGraphClick) {
@@ -2143,7 +2346,7 @@ returncode: ${esc(error.returncode ?? "")}</pre>
           return;
         }
       }
-      const target = event.target.closest("[data-node-id], [data-inline-toggle], [data-retry-task], [data-pause-agent], [data-pause-target], [data-select-target], [data-focus-primary-inject], [data-diff-repo], #inject-submit, #primary-inject-submit");
+      const target = event.target.closest("[data-node-id], [data-inline-toggle], [data-retry-task], [data-pause-agent], [data-pause-target], [data-select-target], [data-diff-repo], #inject-submit, #primary-inject-submit");
       if (!target) return;
 
       if (target.dataset.inlineToggle) {
@@ -2153,12 +2356,17 @@ returncode: ${esc(error.returncode ?? "")}</pre>
         } else {
           app.openDetails.add(key);
         }
-        renderPrimaryTerminal();
+        if (key.startsWith("focus-description:")) {
+          renderFocus();
+        } else {
+          renderPrimaryTerminal();
+        }
         return;
       }
 
       if (target.dataset.nodeId) {
         app.selectedNodeId = target.dataset.nodeId;
+        app.selectionCleared = false;
         renderAll();
         return;
       }
@@ -2200,12 +2408,6 @@ returncode: ${esc(error.returncode ?? "")}</pre>
         const injectTarget = document.getElementById("inject-target");
         if (injectTarget) injectTarget.value = target.dataset.selectTarget;
         const messageBox = document.getElementById("inject-message");
-        if (messageBox) messageBox.focus();
-        return;
-      }
-
-      if (target.dataset.focusPrimaryInject) {
-        const messageBox = document.getElementById("primary-inject-message");
         if (messageBox) messageBox.focus();
         return;
       }

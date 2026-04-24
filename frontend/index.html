@@ -35,7 +35,7 @@
           <button id="tab-button-polecats" class="surface-tab" type="button" role="tab" aria-selected="false" aria-controls="tab-polecats" data-tab-target="polecats">Polecats</button>
           <button id="tab-button-agents" class="surface-tab" type="button" role="tab" aria-selected="false" aria-controls="tab-agents" data-tab-target="agents">Agents</button>
           <button id="tab-button-swarm-feed" class="surface-tab" type="button" role="tab" aria-selected="false" aria-controls="tab-swarm-feed" data-tab-target="swarm-feed">Swarm Feed</button>
-          <button id="tab-button-git-memory" class="surface-tab" type="button" role="tab" aria-selected="false" aria-controls="tab-git-memory" data-tab-target="git-memory">Git Memory</button>
+          <button id="tab-button-git-memory" class="surface-tab" type="button" role="tab" aria-selected="false" aria-controls="tab-git-memory" data-tab-target="git-memory">Git History</button>
           <button id="tab-button-overview" class="surface-tab" type="button" role="tab" aria-selected="false" aria-controls="tab-overview" data-tab-target="overview">Town Index</button>
           <button id="tab-button-town-raw" class="surface-tab" type="button" role="tab" aria-selected="false" aria-controls="tab-town-raw" data-tab-target="town-raw">Town Raw</button>
           <button id="tab-button-misc" class="surface-tab" type="button" role="tab" aria-selected="false" aria-controls="tab-misc" data-tab-target="misc">Misc</button>
@@ -61,11 +61,7 @@
 
     <div class="tab-panels">
       <section id="tab-mayor" class="tab-panel mayor-tab active" data-tab-panel="mayor" role="tabpanel" aria-labelledby="tab-button-mayor">
-        <section class="panel mayor-panel">
-          <div class="panel-head">
-            <h2>Mayor</h2>
-            <div class="subtle" id="primary-terminal-summary"></div>
-          </div>
+        <section class="mayor-panel">
           <div class="terminal-main mayor-terminal-main" id="primary-terminal"></div>
         </section>
       </section>
@@ -76,33 +72,50 @@
             <div class="panel-head">
               <div>
                 <h2>Task Spine</h2>
-                <div class="subtle">Tasks and commit memory nodes, with dependency and lineage edges.</div>
+                <div class="subtle">Tasks and linked commit nodes, with dependency and lineage edges.</div>
               </div>
               <div class="toolbar">
-                <label class="toggle">
-                  <input id="hide-completed-convoys" type="checkbox" checked>
-                  <span>Hide completed convoys</span>
+                <label class="filter-group" for="hide-completed">
+                  <span>Hide completed:</span>
+                  <select id="hide-completed">
+                    <option value="all" selected>All</option>
+                    <option value="older_than_7_days">Older than 7 days</option>
+                    <option value="none">None</option>
+                  </select>
                 </label>
                 <label class="toggle">
                   <input id="include-system" type="checkbox">
                   <span>Include system tasks</span>
                 </label>
                 <div class="subtle" id="graph-summary"></div>
+                <div class="task-legend-menu" tabindex="0" aria-describedby="task-spine-legend-tooltip" aria-label="Task spine legend">
+                  <span class="task-legend-trigger">Legend</span>
+                  <div class="pill-tooltip task-legend-tooltip" id="task-spine-legend-tooltip" role="tooltip">
+                    <table class="legend-table">
+                      <tbody id="task-spine-legend-body">
+                        <tr>
+                          <td><span class="chip">loading</span></td>
+                          <td>Waiting for GT status legend.</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               </div>
             </div>
-            <div class="graph-wrap">
-              <div class="graph-stage" id="graph-stage">
-                <svg class="graph-svg" id="graph-svg"></svg>
-                <div class="graph-nodes" id="graph-nodes"></div>
+            <div class="graph-frame">
+              <div class="graph-wrap">
+                <div class="graph-stage" id="graph-stage">
+                  <svg class="graph-svg" id="graph-svg"></svg>
+                  <div class="graph-nodes" id="graph-nodes"></div>
+                </div>
               </div>
-            </div>
-            <div class="legend">
-              <span class="chip running">running</span>
-              <span class="chip stuck">stuck</span>
-              <span class="chip ready">ready</span>
-              <span class="chip done">done</span>
-              <span class="chip ice">deferred</span>
-              <span class="chip memory">git memory</span>
+              <div class="graph-viewport-map" id="graph-viewport-map" role="button" aria-label="Graph minimap. Click to center viewport." hidden>
+                <div class="graph-map-content" id="graph-map-content">
+                  <svg class="graph-map-preview" id="graph-map-preview" aria-hidden="true"></svg>
+                  <div class="graph-map-view" id="graph-map-view"></div>
+                </div>
+              </div>
             </div>
           </section>
 
@@ -161,7 +174,7 @@
         <section class="panel">
           <div class="panel-head">
             <div>
-              <h2>Git Memory</h2>
+              <h2>Git History</h2>
               <div class="subtle">Recent commits, branch/worktree state, and diff-on-demand.</div>
             </div>
             <div class="subtle" id="git-summary"></div>

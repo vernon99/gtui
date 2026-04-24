@@ -7,7 +7,7 @@ are kept as stable contract fixtures, not as live data.
 Files:
 
 - `snapshot_contract_populated.json` — populated workspace with graph, agents,
-  git memory, stores, convoys, actions, and transcript views. Long transcript
+  git history, stores, convoys, actions, and transcript views. Long transcript
   arrays inside action payloads were trimmed to keep the fixture small.
 - `snapshot_contract_empty.json` — empty workspace root. The `gt` CLI can still
   report globally registered rigs, so `git`/`agents`/`crews` may be non-empty;
@@ -24,7 +24,7 @@ catch accidental removal or reshaping of frontend-facing sections.
 ```text
 actions, activity, agents, alerts, convoys, crews, errors,
 generated_at, generation_ms, git, graph, gt_root, status,
-status_legend, stores, summary, timings, vitals_raw
+stores, summary, timings, vitals_raw
 ```
 
 ### Counts Observed In Fixtures
@@ -41,8 +41,7 @@ status_legend, stores, summary, timings, vitals_raw
 | `stores`                       | 4         | 0     |
 | `agents`                       | 11        | 7     |
 | `alerts`                       | 2         | 1     |
-| `summary` keys                 | 11        | 11    |
-| `status_legend` entries        | 7         | 7     |
+| `summary` keys                 | 4         | 4     |
 | `actions`                      | 12 cap    | 0     |
 
 ### Inner Key Schemas
@@ -50,10 +49,10 @@ status_legend, stores, summary, timings, vitals_raw
 - `graph.nodes[i]` — `agent_targets, assignee, blocked_by, blocked_by_count,
   closed_at, created_at, dependency_count, dependent_count, description, id,
   is_system, kind, labels, linked_commit_count, linked_commits, owner, parent,
-  priority, scope, status, title, type, ui_status, updated_at`
+  priority, scope, status, title, type, updated_at`
 - `graph.edges[i]` — `kind, source, target`
 - `activity.groups[i]` — `agent_count, agents, events, is_system, memory,
-  scope, stored_status, task_id, title, ui_status`
+  scope, stored_status, task_id, title`
 - `git.repos[i]` — `branches, id, label, recent_commits, root, scope, scopes,
   status, worktrees`
 - `git.recent_commits[i]` — `committed_at, refs, repo_id, repo_label, sha,
@@ -66,8 +65,6 @@ status_legend, stores, summary, timings, vitals_raw
 - `agents[i]` — `crew, current_command, current_path, events, has_session,
   hook, kind, label, pane_id, recent_task, role, scope, session_name, target,
   task_events`
-- `summary` — `active_agents, command_errors, derived_status_counts,
-  done_tasks, ready_tasks, repos, running_tasks, stored_status_counts,
-  stuck_tasks, system_running, task_groups`
+- `summary` — `active_agents, command_errors, repos, task_groups`
 - `status` — `overseer, raw, root_path, services, tmux_socket, town`
 - `alerts` — `Vec<String>`

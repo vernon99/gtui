@@ -94,7 +94,6 @@ fn get_snapshot_round_trips_installed_snapshot() {
     let value = invoke_json(&webview, "get_snapshot", json!({})).expect("get_snapshot ok");
     assert_eq!(value["gt_root"], "/tmp/ipc-roundtrip");
     assert_eq!(value["alerts"][0], "ipc-ok");
-    assert!(value["status_legend"].is_array());
 }
 
 #[test]

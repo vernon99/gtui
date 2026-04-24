@@ -176,10 +176,10 @@
           <div class="panel-head">
             <div>
               <h2>Task Spine</h2>
-              <div class="subtle">Tasks and commit memory nodes, with dependency and lineage edges.</div>
+              <div class="subtle">Tasks and linked commit nodes, with dependency and lineage edges.</div>
             </div>
             <div class="toolbar">
-              <label class="toggle"><input type="checkbox" checked> <span>Hide completed convoys</span></label>
+              <label class="filter-group"><span>Hide completed:</span> <select><option>All</option></select></label>
               <div class="subtle">6 nodes · 5 edges</div>
             </div>
           </div>
@@ -213,10 +213,10 @@
                   <div class="node-title">Serve CSS and modules directly from frontend/</div>
                   <div class="node-meta"><span class="chip done">closed</span><span class="chip">tauri</span></div>
                 </div>
-                <div class="node commit memory" style="left: 572px; top: 214px;">
-                  <div class="node-top"><div class="node-id">9f6c689</div><span class="status-dot memory"></span></div>
+                <div class="node commit" style="left: 572px; top: 214px;">
+                  <div class="node-top"><div class="node-id">9f6c689</div><span class="status-dot commit"></span></div>
                   <div class="node-title">9f6c689 · main</div>
-                  <div class="node-meta"><span class="chip memory">commit</span></div>
+                  <div class="node-meta"><span class="chip commit">linked commit</span></div>
                 </div>
                 <div class="node task ice" style="left: 572px; top: 322px;">
                   <div class="node-top"><div class="node-id">hq-smoke</div><span class="status-dot ice"></span></div>
@@ -232,7 +232,7 @@
             <span class="chip ready">ready</span>
             <span class="chip done">done</span>
             <span class="chip ice">deferred</span>
-            <span class="chip memory">git memory</span>
+            <span class="chip commit">linked commit</span>
           </div>
         </section>
 

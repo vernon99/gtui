@@ -15,68 +15,11 @@
     "raw": "Town: gt\n/Users/mervinkel/gt\n\n👤 Overseer: Mikhail Larionov <michael@shinytales.com>\n\n🔔 DND: off (gui-gtui-polecat-furiosa)\n   notifications normal\n\nServices: daemon (PID 93843)  dolt (PID 99603, :3307, ~/gt/.dolt-data)  tmux (-L gt-e15b6d, PID 57725, 9 sessions, /tmp/tmux-501/gt-e15b6d)\n\n🎩 mayor        ● [claude]\n🐺 deacon       ● [claude]\n\n─── gastown/ ───────────────────────────────────────────\n\n🦉 witness      ○ [claude] → mol-witness-patrol\n🏭 refinery     ○ [claude] → mol-refinery-patrol\n👷 Crew (1)\n   merv         ○ [claude]\n\n─── gtui/ ───────────────────────────────────────────\n\n🦉 witness      ● [claude] → mol-witness-patrol\n🏭 refinery     ● [claude] → mol-refinery-patrol\n👷 Crew (1)\n   merv         ○ [claude]\n😺 Polecats (4)\n   furiosa      ● [claude]\n   nux          ● [claude]\n   rictus       ● [claude]\n   slit         ● [claude]\n\n─── thgames_client/ ───────────────────────────────────────────\n\n🦉 witness      ○ [claude] → mol-witness-patrol\n🏭 refinery     ○ [claude]\n👷 Crew (1)\n   joe          ○ [claude]"
   },
   "vitals_raw": "Dolt Servers\n  ● :3307  production  PID 99603  519.5 MB  5/1000 conn  0s\n  ○ :60848 test zombie PID 36163\n  ○ :60910 test zombie PID 36710\n  ○ :60977 test zombie PID 37464\n  ○ :61045 test zombie PID 37694\n  ○ :61097 test zombie PID 37850\n  ○ :61132 test zombie PID 38353\n  ○ :61159 test zombie PID 38774\n\nDatabases (5 registered)\n  Rig          Total  Open  Closed     %\n  GameJam         18    11       5   27%\n  gt              33    32       1    3%\n  gtui            33    21      11   33%\n  hq             455   176     279   61%\n  thgames_client    44     8      36   81%\n\nBackups\n  Local:  ~/gt/.dolt-backup  last sync 2026-04-21 20:22 (5 DBs)\n  JSONL:  not available",
-  "status_legend": [
-    {
-      "name": "open",
-      "icon": "○",
-      "category": "active",
-      "meaning": "Available to work (default)"
-    },
-    {
-      "name": "in_progress",
-      "icon": "◐",
-      "category": "wip",
-      "meaning": "Actively being worked on"
-    },
-    {
-      "name": "blocked",
-      "icon": "●",
-      "category": "wip",
-      "meaning": "Blocked by a dependency"
-    },
-    {
-      "name": "deferred",
-      "icon": "❄",
-      "category": "frozen",
-      "meaning": "Deliberately put on ice for later"
-    },
-    {
-      "name": "closed",
-      "icon": "✓",
-      "category": "done",
-      "meaning": "Completed"
-    },
-    {
-      "name": "pinned",
-      "icon": "📌",
-      "category": "frozen",
-      "meaning": "Persistent, stays open indefinitely"
-    },
-    {
-      "name": "hooked",
-      "icon": "◇",
-      "category": "wip",
-      "meaning": "Attached to an agent hook"
-    }
-  ],
   "summary": {
-    "running_tasks": 0,
-    "stuck_tasks": 0,
-    "ready_tasks": 0,
-    "done_tasks": 0,
-    "system_running": 0,
     "active_agents": 4,
     "task_groups": 0,
     "repos": 3,
-    "command_errors": 9,
-    "stored_status_counts": {},
-    "derived_status_counts": {
-      "running": 0,
-      "stuck": 0,
-      "ready": 0,
-      "done": 0,
-      "ice": 0
-    }
+    "command_errors": 9
   },
   "alerts": [
     "1 crew workspace(s) have risky repo changes."

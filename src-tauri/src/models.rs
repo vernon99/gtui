@@ -52,8 +52,6 @@ pub struct TaskInfo {
     pub description: String,
     #[serde(default)]
     pub status: String,
-    #[serde(default)]
-    pub ui_status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
     #[serde(rename = "type", default)]
@@ -140,8 +138,6 @@ pub struct ActivityGroup {
     #[serde(default)]
     pub stored_status: String,
     #[serde(default)]
-    pub ui_status: String,
-    #[serde(default)]
     pub is_system: bool,
     #[serde(default)]
     pub scope: String,
@@ -165,20 +161,8 @@ pub struct Activity {
 }
 
 /// Aggregate counters surfaced at the top of the UI.
-///
-/// Grouped JSON sub-objects keep stored and derived status counts separate.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Metrics {
-    #[serde(default)]
-    pub running_tasks: u32,
-    #[serde(default)]
-    pub stuck_tasks: u32,
-    #[serde(default)]
-    pub ready_tasks: u32,
-    #[serde(default)]
-    pub done_tasks: u32,
-    #[serde(default)]
-    pub system_running: u32,
     #[serde(default)]
     pub active_agents: u32,
     #[serde(default)]
@@ -187,10 +171,6 @@ pub struct Metrics {
     pub repos: u32,
     #[serde(default)]
     pub command_errors: u32,
-    #[serde(default)]
-    pub stored_status_counts: BTreeMap<String, u32>,
-    #[serde(default)]
-    pub derived_status_counts: BTreeMap<String, u32>,
 }
 
 /// Per-phase timings recorded while building a snapshot.
@@ -213,15 +193,6 @@ pub struct Timings {
 /// some entries carry extra adhoc fields.
 pub type CommandError = Value;
 
-/// Entry in the snapshot's legend describing a single bead status.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct StatusLegendEntry {
-    pub name: String,
-    pub icon: String,
-    pub category: String,
-    pub meaning: String,
-}
-
 /// Top-level snapshot: everything the UI needs to render one frame of the
 /// dashboard. Loosely typed sections (`graph`, `git`, `convoys`, `crews`,
 /// `stores`, `actions`) are kept as `serde_json::Value` so their nested shape
@@ -237,8 +208,6 @@ pub struct WorkspaceSnapshot {
     pub status: StatusSummary,
     #[serde(default)]
     pub vitals_raw: String,
-    #[serde(default)]
-    pub status_legend: Vec<StatusLegendEntry>,
     #[serde(default)]
     pub summary: Metrics,
     #[serde(default)]
@@ -265,54 +234,6 @@ pub struct WorkspaceSnapshot {
     pub timings: Timings,
 }
 
-/// The canonical legend. Matches `STATUS_LEGEND` in `the snapshot contract`.
-pub fn default_status_legend() -> Vec<StatusLegendEntry> {
-    vec![
-        StatusLegendEntry {
-            name: "open".into(),
-            icon: "○".into(),
-            category: "active".into(),
-            meaning: "Available to work (default)".into(),
-        },
-        StatusLegendEntry {
-            name: "in_progress".into(),
-            icon: "◐".into(),
-            category: "wip".into(),
-            meaning: "Actively being worked on".into(),
-        },
-        StatusLegendEntry {
-            name: "blocked".into(),
-            icon: "●".into(),
-            category: "wip".into(),
-            meaning: "Blocked by a dependency".into(),
-        },
-        StatusLegendEntry {
-            name: "deferred".into(),
-            icon: "❄".into(),
-            category: "frozen".into(),
-            meaning: "Deliberately put on ice for later".into(),
-        },
-        StatusLegendEntry {
-            name: "closed".into(),
-            icon: "✓".into(),
-            category: "done".into(),
-            meaning: "Completed".into(),
-        },
-        StatusLegendEntry {
-            name: "pinned".into(),
-            icon: "📌".into(),
-            category: "frozen".into(),
-            meaning: "Persistent, stays open indefinitely".into(),
-        },
-        StatusLegendEntry {
-            name: "hooked".into(),
-            icon: "◇".into(),
-            category: "wip".into(),
-            meaning: "Attached to an agent hook".into(),
-        },
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,13 +254,9 @@ mod tests {
                 raw: "Town: gastown\n".into(),
             },
             vitals_raw: "ok".into(),
-            status_legend: default_status_legend(),
             summary: Metrics {
-                running_tasks: 3,
                 active_agents: 2,
                 task_groups: 4,
-                stored_status_counts: BTreeMap::from([("open".into(), 5)]),
-                derived_status_counts: BTreeMap::from([("running".into(), 3)]),
                 ..Metrics::default()
             },
             alerts: vec!["Gas Town daemon is stopped.".into()],
@@ -348,7 +265,6 @@ mod tests {
                 groups: vec![ActivityGroup {
                     task_id: "gui-bn8.3".into(),
                     title: "Port data models".into(),
-                    ui_status: "running".into(),
                     agents: vec![AgentInfo {
                         target: "gtui/polecats/furiosa".into(),
                         role: "polecat".into(),
@@ -395,14 +311,6 @@ mod tests {
         assert_eq!(value["agent_targets"][0], "gtui/polecats/furiosa");
         let back: TaskInfo = serde_json::from_value(value).expect("decode");
         assert_eq!(back, task);
-    }
-
-    #[test]
-    fn status_legend_matches_contract_count_and_order() {
-        let legend = default_status_legend();
-        assert_eq!(legend.len(), 7);
-        assert_eq!(legend[0].name, "open");
-        assert_eq!(legend[6].name, "hooked");
     }
 
     #[test]

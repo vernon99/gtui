@@ -7,7 +7,6 @@
 
 mod common;
 
-use gtui_lib::models::default_status_legend;
 use gtui_lib::parse::{parse_feed, parse_services, parse_status_summary};
 
 #[test]
@@ -65,24 +64,4 @@ fn crew_list_fixture_parses_as_array() {
         })
         .count();
     assert_eq!(risky, 2);
-}
-
-#[test]
-fn status_legend_is_stable() {
-    // Re-checks the legend across the public API boundary, ensuring the
-    // frontend doesn't silently lose an icon if the legend is re-exported.
-    let legend = default_status_legend();
-    let names: Vec<&str> = legend.iter().map(|e| e.name.as_str()).collect();
-    assert_eq!(
-        names,
-        vec![
-            "open",
-            "in_progress",
-            "blocked",
-            "deferred",
-            "closed",
-            "pinned",
-            "hooked",
-        ]
-    );
 }

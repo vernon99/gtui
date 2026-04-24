@@ -2,7 +2,7 @@
 //!
 //! This file is the executable form of the desktop app's acceptance checklist:
 //! it pins the six UI-visible sections the frontend depends on — Task Spine,
-//! Git Memory, Bead Stores, Crew Workspaces, Convoys-derived filtering, and
+//! Git History, Bead Stores, Crew Workspaces, Convoys-derived filtering, and
 //! actionable Focus controls — to the populated snapshot contract so a future
 //! change that silently drops one of them trips the suite.
 //!
@@ -67,9 +67,9 @@ fn task_spine_has_nodes_edges_and_activity_groups() {
         "Task Spine: activity.groups must be non-empty so the spine has per-task rows"
     );
 
-    // Every task row the UI renders needs id + title + ui_status.
+    // Every task row the UI renders needs id + title + raw GT status.
     for (i, node) in nodes.iter().enumerate() {
-        for key in ["id", "title", "ui_status", "status"] {
+        for key in ["id", "title", "status"] {
             assert!(
                 node.get(key)
                     .and_then(Value::as_str)
@@ -112,25 +112,28 @@ fn task_spine_has_nodes_edges_and_activity_groups() {
     );
 }
 
-/// Git Memory — `git.repos`, `git.recent_commits`, and `git.task_memory` feed
-/// the Git Memory pane. The spine links commits back to tasks via
+/// Git History — `git.repos`, `git.recent_commits`, and `git.task_memory` feed
+/// the Git History pane. The spine links commits back to tasks via
 /// `task_memory` (keyed by task id) and `recent_commits[*].task_ids`.
 #[test]
-fn git_memory_has_repos_commits_and_task_links() {
+fn git_history_has_repos_commits_and_task_links() {
     let snap = load_fixture_json(POPULATED);
 
     let repos = as_array(&snap, &["git", "repos"]);
     let commits = as_array(&snap, &["git", "recent_commits"]);
     let task_memory_len = as_object_len(&snap, &["git", "task_memory"]);
 
-    assert!(!repos.is_empty(), "Git Memory: git.repos must be non-empty");
+    assert!(
+        !repos.is_empty(),
+        "Git History: git.repos must be non-empty"
+    );
     assert!(
         !commits.is_empty(),
-        "Git Memory: git.recent_commits must be non-empty"
+        "Git History: git.recent_commits must be non-empty"
     );
     assert!(
         task_memory_len > 0,
-        "Git Memory: git.task_memory must map at least one task id to commits"
+        "Git History: git.task_memory must map at least one task id to commits"
     );
 
     // Frontend 'Load diff' is only reachable when commits carry repo_id + sha.
@@ -144,7 +147,7 @@ fn git_memory_has_repos_commits_and_task_links() {
     });
     assert!(
         loadable,
-        "Git Memory: at least one recent commit must carry repo_id + sha \
+        "Git History: at least one recent commit must carry repo_id + sha \
          so the UI's 'Load diff' action is reachable"
     );
 }
