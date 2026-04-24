@@ -33,6 +33,7 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "git",
     "graph",
     "gt_root",
+    "rigs",
     "status",
     "stores",
     "summary",
@@ -392,6 +393,29 @@ fn populated_fixture_crews_carry_enrichment_and_running_metadata() {
             benign_u + risky_u,
             "crews[{i}].git_untracked must equal git_benign_untracked + git_risky_untracked"
         );
+    }
+}
+
+#[test]
+fn populated_fixture_rigs_carry_lifecycle_status() {
+    let snap = load_fixture_json(POPULATED);
+    let rigs = snap["rigs"].as_array().expect("rigs must be an array");
+    assert!(!rigs.is_empty(), "populated fixture should list rigs");
+
+    for (i, rig) in rigs.iter().enumerate() {
+        assert_keys_present(
+            rig,
+            &["name", "scope", "path", "status", "witness", "refinery"],
+            &format!("rigs[{i}]"),
+        );
+        for key in ["name", "scope", "status", "witness", "refinery"] {
+            assert!(
+                rig.get(key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.is_empty()),
+                "rigs[{i}].{key} missing or empty"
+            );
+        }
     }
 }
 

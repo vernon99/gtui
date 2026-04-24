@@ -23,7 +23,7 @@ catch accidental removal or reshaping of frontend-facing sections.
 
 ```text
 actions, activity, agents, alerts, convoys, crews, errors,
-generated_at, generation_ms, git, graph, gt_root, status,
+generated_at, generation_ms, git, graph, gt_root, rigs, status,
 stores, summary, timings, vitals_raw
 ```
 
@@ -39,6 +39,7 @@ stores, summary, timings, vitals_raw
 | `git.recent_commits`           | >=1       | >=1   |
 | `convoys.convoys`              | >=1       | 0     |
 | `stores`                       | 4         | 0     |
+| `rigs`                         | 3         | 0     |
 | `agents`                       | 11        | 7     |
 | `alerts`                       | 2         | 1     |
 | `summary` keys                 | 4         | 4     |
@@ -62,6 +63,7 @@ stores, summary, timings, vitals_raw
 - `convoys.convoys[i]` — `completed, id, status, title, total, tracked_ids`
 - `stores[i]` — `available, blocked, closed, error, exact_status_counts,
   hooked, name, open, path, scope, summary, total`
+- `rigs[i]` — `name, scope, path, status, witness, refinery` plus CLI fields
 - `agents[i]` — `crew, current_command, current_path, events, has_session,
   hook, kind, label, pane_id, recent_task, role, scope, session_name, target,
   task_events`

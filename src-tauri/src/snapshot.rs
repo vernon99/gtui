@@ -23,7 +23,7 @@ use crate::config::{
     DB_BACKED_COLLECTION_TTL, GIT_MEMORY_TTL, GT_STATUS_TIMEOUT, POLL_INTERVAL, TERMINAL_STATE_TTL,
 };
 use crate::models::{
-    Activity, ActivityGroup, AgentInfo, Metrics, StatusSummary, Timings, WorkspaceSnapshot,
+    Activity, ActivityGroup, AgentInfo, Metrics, RigInfo, StatusSummary, Timings, WorkspaceSnapshot,
 };
 use crate::parse::{
     normalize_lines, normalize_path_value, now_iso, parse_feed, parse_status_summary,
@@ -685,6 +685,72 @@ impl SnapshotStore {
             Duration::from_secs(45),
         )
         .await
+    }
+
+    /// Resume a parked rig without spawning agents from GTUI. The daemon may
+    /// restart patrol agents after the rig is unparked.
+    pub async fn run_rig(&self, rig: &str) -> Result<Value, String> {
+        let rig = validate_rig_name(rig)?;
+        let command = ["gt", "rig", "unpark", rig.as_str()];
+        self.run_gt_control(
+            "run-rig",
+            &command,
+            &format!("Rig {rig} resume requested."),
+            Duration::from_secs(15),
+        )
+        .await
+    }
+
+    /// Stop all agents in one rig using GT's normal non-nuclear safety checks,
+    /// then park it so the daemon does not immediately restart patrol agents.
+    pub async fn stop_rig(&self, rig: &str) -> Result<Value, String> {
+        let rig = validate_rig_name(rig)?;
+        let stop_command = ["gt", "rig", "stop", rig.as_str()];
+        let park_command = ["gt", "rig", "park", rig.as_str()];
+        let stop_result = run_command(
+            &stop_command,
+            &self.inner.gt_root,
+            RunOptions::default().with_timeout(Duration::from_secs(45)),
+        )
+        .await;
+
+        let mut ok = stop_result.ok;
+        let mut outputs = vec![action_output(&stop_result)];
+        if ok {
+            let park_result = run_command(
+                &park_command,
+                &self.inner.gt_root,
+                RunOptions::default().with_timeout(Duration::from_secs(15)),
+            )
+            .await;
+            ok = park_result.ok;
+            outputs.push(action_output(&park_result));
+        }
+
+        let output = outputs
+            .into_iter()
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let action = json!({
+            "kind": "stop-rig",
+            "command": format!("{} && {}", display_command(&stop_command), display_command(&park_command)),
+            "ok": ok,
+            "output": if output.is_empty() && ok {
+                format!("Rig {rig} parked.")
+            } else {
+                output
+            },
+            "timestamp": now_iso(),
+        });
+        self.record_action(action.clone());
+        if ok {
+            self.invalidate_io_cache();
+            self.invalidate_terminal_cache(None);
+        }
+        let _ = self.refresh_once().await;
+        Ok(action)
     }
 
     /// Implementation of `SnapshotStore.get_terminal_state`. Returns a cached
@@ -1362,7 +1428,39 @@ fn action_output(result: &crate::command::CommandResult) -> String {
     }
 }
 
-/// Build one snapshot frame. Fans out the five common `gt` calls in parallel
+fn validate_rig_name(rig: &str) -> Result<String, String> {
+    let rig = rig.trim();
+    if rig.is_empty() {
+        return Err("Rig name is required.".into());
+    }
+    if rig == "all" || rig == "hq" || rig.contains('/') || rig.chars().any(char::is_whitespace) {
+        return Err(format!("Invalid rig name: {rig}"));
+    }
+    Ok(rig.to_string())
+}
+
+fn parse_rig_list(data: Option<&Value>, gt_root: &Path) -> Vec<RigInfo> {
+    let mut rigs: Vec<RigInfo> = data
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| serde_json::from_value::<RigInfo>(item.clone()).ok())
+        .filter(|rig| !rig.name.trim().is_empty())
+        .map(|mut rig| {
+            if rig.scope.trim().is_empty() {
+                rig.scope = rig.name.clone();
+            }
+            if rig.path.trim().is_empty() {
+                rig.path = gt_root.join(&rig.name).to_string_lossy().into_owned();
+            }
+            rig
+        })
+        .collect();
+    rigs.sort_by(|a, b| a.name.cmp(&b.name));
+    rigs
+}
+
+/// Build one snapshot frame. Fans out the six common `gt` calls in parallel
 /// and folds their errors into `snapshot.errors`. The downstream stubs
 /// (agents / beads / git / convoys / graph) are placeholder `Value::Null`
 /// shapes pending dedicated ports.
@@ -1386,7 +1484,7 @@ async fn build_snapshot_internal(
     let started = Instant::now();
 
     // Three independent top-level phases run in parallel:
-    //   - the 5 gt subprocesses that feed status/crews/feed
+    //   - the 6 gt subprocesses that feed status/rigs/crews/feed
     //   - per-store `bd` fan-out (discovered synchronously from disk)
     //   - convoy list
     // Agents, bead folding, and Git history run after because they consume
@@ -1409,6 +1507,13 @@ async fn build_snapshot_internal(
                 &["gt", "crew", "status", "--json"],
                 gt_root,
                 RunOptions::default().parse_json(),
+            ),
+            run_command(
+                &["gt", "rig", "list", "--json"],
+                gt_root,
+                RunOptions::default()
+                    .with_timeout(Duration::from_secs(6))
+                    .parse_json(),
             ),
             run_command(
                 &[
@@ -1441,7 +1546,14 @@ async fn build_snapshot_internal(
         }
     };
     let (
-        (status_result, vitals_result, crew_list_result, crew_status_result, feed_result),
+        (
+            status_result,
+            vitals_result,
+            crew_list_result,
+            crew_status_result,
+            rig_list_result,
+            feed_result,
+        ),
         (store_summaries, bead_store_snapshots, store_errors, bead_ms),
         (convoys, convoy_errors, convoy_ms),
     ) = tokio::join!(gt_commands_future, bead_stores_future, convoy_future,);
@@ -1452,6 +1564,7 @@ async fn build_snapshot_internal(
         &vitals_result,
         &crew_list_result,
         &crew_status_result,
+        &rig_list_result,
         &feed_result,
     ] {
         if !result.ok {
@@ -1463,6 +1576,7 @@ async fn build_snapshot_internal(
         + vitals_result.duration_ms
         + crew_list_result.duration_ms
         + crew_status_result.duration_ms
+        + rig_list_result.duration_ms
         + feed_result.duration_ms;
 
     let status_summary: StatusSummary = if status_result.ok {
@@ -1500,6 +1614,7 @@ async fn build_snapshot_internal(
         .cloned()
         .unwrap_or_default();
     let crews = merge_crews(crews_list, crews_running);
+    let rigs = parse_rig_list(rig_list_result.data.as_ref(), gt_root);
 
     let feed_events: Vec<Value> = if feed_result.ok {
         let text = feed_result
@@ -1603,6 +1718,7 @@ async fn build_snapshot_internal(
         activity,
         git,
         convoys,
+        rigs,
         crews,
         agents,
         stores: store_summaries,

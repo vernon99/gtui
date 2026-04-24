@@ -6,6 +6,7 @@ import {
   resolvePrimaryTerminalAgent,
   snapshotPrimaryTerminalIsDegraded,
 } from "./primary-terminal.mjs";
+import { describeRigRuntime } from "./rigs.mjs";
 import {
   getTranscriptView,
   hasTranscriptItems,
@@ -60,9 +61,14 @@ import {
       includeSystem: false,
       hideCompleted: "all",
       primaryInjectDraft: "",
+      primaryComposerFocusPending: true,
       primarySending: false,
       gtControlInFlight: false,
       gtControlAction: "",
+      rigControlInFlight: false,
+      rigControlAction: "",
+      rigControlScope: "",
+      scopeMenuOpen: false,
       activeTab: "mayor",
       bootStartedMs: Date.now(),
       lastSuccessMs: 0,
@@ -133,8 +139,12 @@ import {
     function selectTab(tab) {
       const panel = [...document.querySelectorAll("[data-tab-panel]")].find((item) => item.dataset.tabPanel === tab);
       if (!panel) return;
+      const previousTab = app.activeTab;
       app.activeTab = tab;
       syncTabs();
+      if (tab === "mayor" && previousTab !== "mayor") {
+        requestPrimaryComposerFocus();
+      }
     }
 
     function formatTime(value) {
@@ -233,10 +243,85 @@ import {
         || title.includes("-polecat-");
     }
 
-    function syncScopeSelector() {
-      const select = document.getElementById("scope-select");
+    function scopeLabel(scope) {
+      return scope === "all" ? "All" : scope === "hq" ? "HQ" : scope;
+    }
+
+    function rigSnapshotInfo(scope) {
+      const normalized = normalizeScope(scope);
+      if (!normalized || normalized === "hq") return null;
+      return (app.snapshot?.rigs || []).find((rig) => {
+        const name = normalizeScope(rig.name);
+        const rigScope = normalizeScope(rig.scope || rig.name);
+        return name === normalized || rigScope === normalized;
+      }) || null;
+    }
+
+    function rigRuntimeSummary(rig) {
+      return describeRigRuntime(rig, app.snapshot?.agents || []);
+    }
+
+    function rigMenuMeta(scope) {
+      if (scope === "all") return "view";
+      if (scope === "hq") return "town";
+      const rig = rigSnapshotInfo(scope);
+      if (!rig) return "";
+      return rigRuntimeSummary(rig).label;
+    }
+
+    function rigControlForScope(scope) {
+      const rig = rigSnapshotInfo(scope);
+      if (!rig) return null;
+      const name = String(rig.name || scope);
+      const runtime = rigRuntimeSummary(rig);
+      if (runtime.blocked) {
+        return {
+          action: "",
+          rig: name,
+          label: runtime.label,
+          ariaLabel: `${scopeLabel(scope)} is ${runtime.label}`,
+          tone: "",
+          disabled: true,
+        };
+      }
+      if (app.rigControlInFlight && app.rigControlScope === name) {
+        const action = app.rigControlAction || (runtime.running ? "stop" : "run");
+        return {
+          action,
+          rig: name,
+          label: action === "stop" ? "Stop" : "Run",
+          ariaLabel: action === "stop" ? `Stopping ${name}` : `Starting ${name}`,
+          tone: action === "stop" ? "danger" : "ready",
+          disabled: true,
+        };
+      }
+      if (runtime.running) {
+        return {
+          action: "stop",
+          rig: name,
+          label: "Stop",
+          ariaLabel: `Stop ${name}`,
+          tone: "danger",
+          disabled: false,
+        };
+      }
+      return {
+        action: "run",
+        rig: name,
+        label: "Run",
+        ariaLabel: `Run ${name}`,
+        tone: "ready",
+        disabled: false,
+      };
+    }
+
+    function scopeOptions() {
       const scopes = new Set(["hq"]);
       const snapshot = app.snapshot || {};
+      (snapshot.rigs || []).forEach((rig) => {
+        const scope = normalizeScope(rig.scope || rig.name);
+        if (scope) scopes.add(scope);
+      });
       (snapshot.graph?.nodes || []).forEach((node) => {
         const scope = normalizeScope(node.scope);
         if (scope) scopes.add(scope);
@@ -260,19 +345,94 @@ import {
         });
       });
 
-      const options = ["all", ...[...scopes].sort((a, b) => {
+      return ["all", ...[...scopes].sort((a, b) => {
         if (a === "hq") return -1;
         if (b === "hq") return 1;
         return a.localeCompare(b);
       })];
+    }
+
+    function syncScopeSelector() {
+      const root = document.getElementById("scope-menu-root");
+      const button = document.getElementById("scope-menu-button");
+      const value = document.getElementById("scope-menu-value");
+      const menu = document.getElementById("scope-menu");
+      if (!root || !button || !value || !menu) return;
+
+      const options = scopeOptions();
       if (app.selectedScope !== "all" && !options.includes(app.selectedScope)) {
         app.selectedScope = "all";
       }
-      select.innerHTML = options.map((scope) => `
-        <option value="${esc(scope)}" ${scope === app.selectedScope ? "selected" : ""}>
-          ${esc(scope === "all" ? "All" : scope === "hq" ? "HQ" : scope)}
-        </option>
-      `).join("");
+      value.textContent = scopeLabel(app.selectedScope);
+      root.classList.toggle("open", app.scopeMenuOpen);
+      button.setAttribute("aria-expanded", app.scopeMenuOpen ? "true" : "false");
+      menu.hidden = !app.scopeMenuOpen;
+
+      menu.innerHTML = options.map((scope) => {
+        const control = rigControlForScope(scope);
+        const optionButton = `
+          <button
+            type="button"
+            class="app-dropdown-item ${control ? "app-dropdown-item-main" : ""}"
+            role="menuitemradio"
+            aria-checked="${scope === app.selectedScope ? "true" : "false"}"
+            data-scope-option="${esc(scope)}"
+          >
+            <span class="app-dropdown-item-label">${esc(scopeLabel(scope))}</span>
+            <span class="app-dropdown-item-meta">${esc(rigMenuMeta(scope))}</span>
+          </button>
+        `;
+        if (!control) return optionButton;
+        return `
+          <div class="app-dropdown-row" role="none">
+            ${optionButton}
+            <button
+              type="button"
+              class="app-dropdown-action ${esc(control.tone)}"
+              role="menuitem"
+              ${control.action ? `data-rig-action="${esc(control.action)}"` : ""}
+              data-rig="${esc(control.rig)}"
+              aria-label="${esc(control.ariaLabel)}"
+              title="${esc(control.ariaLabel)}"
+              ${control.disabled ? "disabled" : ""}
+            >${esc(control.label)}</button>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function scopeMenuButtons() {
+      return [...document.querySelectorAll("#scope-menu button:not([disabled])")];
+    }
+
+    function focusCurrentScopeMenuItem() {
+      const items = scopeMenuButtons();
+      const current = items.find((item) => item.dataset.scopeOption === app.selectedScope) || items[0];
+      current?.focus();
+    }
+
+    function focusAdjacentScopeMenuItem(delta) {
+      const items = scopeMenuButtons();
+      if (!items.length) return;
+      const current = document.activeElement;
+      const index = items.includes(current) ? items.indexOf(current) : 0;
+      items[(index + delta + items.length) % items.length]?.focus();
+    }
+
+    function setScopeMenuOpen(open, focusCurrent = false) {
+      app.scopeMenuOpen = open;
+      syncScopeSelector();
+      if (open && focusCurrent) {
+        window.requestAnimationFrame(focusCurrentScopeMenuItem);
+      }
+    }
+
+    function selectScope(scope) {
+      app.selectedScope = scope;
+      setScopeMenuOpen(false);
+      ensureSelection();
+      renderAll();
+      fetchPrimaryTerminal(true);
     }
 
     function visibleGraphNodes() {
@@ -553,6 +713,23 @@ import {
       box.selectionStart = start;
       box.selectionEnd = end;
       box.scrollTop = Number(state.scrollTop ?? 0);
+    }
+
+    function focusPrimaryComposerIfPending() {
+      if (!app.primaryComposerFocusPending || app.activeTab !== "mayor" || document.hidden) return;
+      const box = document.getElementById("primary-inject-message");
+      if (!box || box.disabled) return;
+      app.primaryComposerFocusPending = false;
+      if (document.activeElement === box) return;
+      box.focus({ preventScroll: true });
+      const end = box.value.length;
+      box.selectionStart = end;
+      box.selectionEnd = end;
+    }
+
+    function requestPrimaryComposerFocus() {
+      app.primaryComposerFocusPending = true;
+      window.requestAnimationFrame(focusPrimaryComposerIfPending);
     }
 
     function shouldFreezePrimaryTerminal() {
@@ -994,6 +1171,7 @@ import {
       restorePrimaryLogState();
       restoreTmuxLogStates(host);
       restorePrimaryComposerState(composerState);
+      focusPrimaryComposerIfPending();
     }
 
     function renderMayorEvents() {
@@ -1948,7 +2126,7 @@ returncode: ${esc(error.returncode ?? "")}</pre>
       const pill = document.getElementById("live-pill");
       const label = document.getElementById("live-label");
       const tooltip = document.getElementById("live-pill-tooltip");
-      pill.classList.remove("stale", "error", "loading", "stopped");
+      pill.classList.remove("stale", "error", "loading", "partial", "stopped");
       const details = [...health.details];
       if (snapshot?.generated_at) {
         details.push(`Observed: ${formatTime(snapshot.generated_at)} (${timeAgo(snapshot.generated_at)})`);
@@ -1965,6 +2143,11 @@ returncode: ${esc(error.returncode ?? "")}</pre>
       }
       if (health.tone === "error") {
         pill.classList.add("error");
+        label.textContent = health.label;
+        return;
+      }
+      if (health.tone === "partial") {
+        pill.classList.add("partial");
         label.textContent = health.label;
         return;
       }
@@ -2002,6 +2185,7 @@ returncode: ${esc(error.returncode ?? "")}</pre>
 
     function updateControlSurfaceState(snapshot) {
       const health = getSnapshotHealth(snapshot);
+      syncScopeSelector();
       updateGtControlButton(snapshot, health);
       updateLivePill(snapshot, health);
     }
@@ -2197,6 +2381,33 @@ returncode: ${esc(error.returncode ?? "")}</pre>
       }
     }
 
+    async function runRigControl(action, rig) {
+      if (app.rigControlInFlight || !rig) return;
+      app.rigControlInFlight = true;
+      app.rigControlAction = action === "stop" ? "stop" : "run";
+      app.rigControlScope = rig;
+      syncScopeSelector();
+      try {
+        const data = await postAction(action === "stop" ? "stop_rig" : "run_rig", { rig }, { refresh: false, successToast: false });
+        if (data?.ok === false) {
+          showToast(data.output || `Failed to ${app.rigControlAction} ${rig}.`, false);
+          await fetchSnapshot(true);
+          return;
+        }
+        showToast(data?.output || `Rig ${rig} ${app.rigControlAction === "stop" ? "shutdown" : "startup"} requested.`, true);
+        await fetchSnapshot(true);
+        window.setTimeout(() => fetchSnapshot(true), 1200);
+        window.setTimeout(() => fetchSnapshot(true), 3200);
+      } catch (error) {
+        showToast(String(error), false);
+      } finally {
+        app.rigControlInFlight = false;
+        app.rigControlAction = "";
+        app.rigControlScope = "";
+        syncScopeSelector();
+      }
+    }
+
     async function loadDiff(repoId, sha) {
       const key = `${repoId}:${sha}`;
       if (app.diffCache.has(key)) {
@@ -2236,11 +2447,46 @@ returncode: ${esc(error.returncode ?? "")}</pre>
       const action = event.currentTarget?.dataset.gtControl || "run";
       await runGtControl(action);
     });
-    document.getElementById("scope-select").addEventListener("change", (event) => {
-      app.selectedScope = event.target.value;
-      ensureSelection();
-      renderAll();
-      fetchPrimaryTerminal(true);
+    document.getElementById("scope-menu-button").addEventListener("click", () => {
+      setScopeMenuOpen(!app.scopeMenuOpen, true);
+    });
+    document.getElementById("scope-menu-button").addEventListener("keydown", (event) => {
+      if (!["ArrowDown", "Enter", " "].includes(event.key)) return;
+      event.preventDefault();
+      setScopeMenuOpen(true, true);
+    });
+    document.getElementById("scope-menu").addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const actionButton = event.target?.closest?.("[data-rig-action]");
+      if (actionButton) {
+        event.preventDefault();
+        const action = actionButton.dataset.rigAction || "run";
+        const rig = actionButton.dataset.rig || "";
+        await runRigControl(action, rig);
+        return;
+      }
+      const scopeButton = event.target?.closest?.("[data-scope-option]");
+      if (scopeButton) {
+        event.preventDefault();
+        selectScope(scopeButton.dataset.scopeOption || "all");
+      }
+    });
+    document.getElementById("scope-menu").addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setScopeMenuOpen(false);
+        document.getElementById("scope-menu-button")?.focus();
+        return;
+      }
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        focusAdjacentScopeMenuItem(event.key === "ArrowDown" ? 1 : -1);
+      }
+    });
+    document.addEventListener("click", (event) => {
+      const root = document.getElementById("scope-menu-root");
+      if (!app.scopeMenuOpen || root?.contains(event.target)) return;
+      setScopeMenuOpen(false);
     });
     document.getElementById("include-system").addEventListener("change", (event) => {
       app.includeSystem = event.target.checked;

@@ -47,6 +47,18 @@ pub async fn stop_gt(store: State<'_, SnapshotStore>) -> Result<Value, String> {
     store.stop_gt().await
 }
 
+/// Start one rig's witness/refinery patrols.
+#[tauri::command]
+pub async fn run_rig(store: State<'_, SnapshotStore>, rig: String) -> Result<Value, String> {
+    store.run_rig(&rig).await
+}
+
+/// Stop one rig through GT's normal shutdown path.
+#[tauri::command]
+pub async fn stop_rig(store: State<'_, SnapshotStore>, rig: String) -> Result<Value, String> {
+    store.stop_rig(&rig).await
+}
+
 /// Retry a task through the Gas Town CLI.
 #[tauri::command]
 pub async fn retry_task(store: State<'_, SnapshotStore>, task_id: String) -> Result<Value, String> {
@@ -180,6 +192,62 @@ mod tests {
             action["command"]
         );
         assert!(action.get("ok").is_some());
+    }
+
+    #[tokio::test]
+    async fn run_rig_records_control_action() {
+        let store = SnapshotStore::new(missing_root());
+        let action = store
+            .run_rig("gtui")
+            .await
+            .expect("run_rig returns action payload");
+        assert_eq!(action["kind"], "run-rig");
+        assert!(
+            action["command"]
+                .as_str()
+                .unwrap_or("")
+                .contains("gt rig unpark gtui"),
+            "got: {}",
+            action["command"]
+        );
+        assert!(action.get("ok").is_some());
+    }
+
+    #[tokio::test]
+    async fn stop_rig_records_control_action() {
+        let store = SnapshotStore::new(missing_root());
+        let action = store
+            .stop_rig("gtui")
+            .await
+            .expect("stop_rig returns action payload");
+        assert_eq!(action["kind"], "stop-rig");
+        assert!(
+            action["command"]
+                .as_str()
+                .unwrap_or("")
+                .contains("gt rig stop gtui"),
+            "got: {}",
+            action["command"]
+        );
+        assert!(
+            action["command"]
+                .as_str()
+                .unwrap_or("")
+                .contains("gt rig park gtui"),
+            "got: {}",
+            action["command"]
+        );
+        assert!(action.get("ok").is_some());
+    }
+
+    #[tokio::test]
+    async fn rig_control_rejects_non_rig_scope() {
+        let store = SnapshotStore::new(missing_root());
+        let err = store
+            .run_rig("hq")
+            .await
+            .expect_err("hq is not a rig action target");
+        assert!(err.contains("Invalid rig name"), "got: {err}");
     }
 
     #[tokio::test]
@@ -341,6 +409,8 @@ mod tests {
             get_git_diff,
             run_gt,
             stop_gt,
+            run_rig,
+            stop_rig,
             retry_task,
             pause_agent,
             inject_message,

@@ -6053,6 +6053,41 @@
       }
     }
   },
+  "rigs": [
+    {
+      "name": "gastown",
+      "scope": "gastown",
+      "path": "/Users/mervinkel/gt/gastown",
+      "beads_prefix": "gt",
+      "status": "operational",
+      "witness": "stopped",
+      "refinery": "stopped",
+      "polecats": 0,
+      "crew": 1
+    },
+    {
+      "name": "gtui",
+      "scope": "gtui",
+      "path": "/Users/mervinkel/gt/gtui",
+      "beads_prefix": "gui",
+      "status": "operational",
+      "witness": "running",
+      "refinery": "running",
+      "polecats": 4,
+      "crew": 1
+    },
+    {
+      "name": "thgames_client",
+      "scope": "thgames_client",
+      "path": "/Users/mervinkel/gt/thgames_client",
+      "beads_prefix": "tg",
+      "status": "operational",
+      "witness": "stopped",
+      "refinery": "stopped",
+      "polecats": 0,
+      "crew": 1
+    }
+  ],
   "crews": [
     {
       "name": "merv",

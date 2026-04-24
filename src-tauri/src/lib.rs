@@ -41,6 +41,8 @@ pub fn run() {
             ipc::get_git_diff,
             ipc::run_gt,
             ipc::stop_gt,
+            ipc::run_rig,
+            ipc::stop_rig,
             ipc::retry_task,
             ipc::pause_agent,
             ipc::inject_message,

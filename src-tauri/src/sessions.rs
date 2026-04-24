@@ -952,6 +952,14 @@ fn is_system_generated_user_text(text: &str) -> bool {
     {
         return true;
     }
+    if normalized
+        .trim_start_matches('📬')
+        .trim_start()
+        .starts_with("You have new mail from ")
+        && normalized.contains("Run 'gt mail inbox' to read")
+    {
+        return true;
+    }
     if normalized.starts_with("Remember to reply to ")
         && normalized.contains(" via `gt mail send ")
         && normalized.contains("not in chat")
@@ -1463,6 +1471,32 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("QUEUED NUDGE"));
+        assert_eq!(items[1]["kind"], "user");
+        assert_eq!(items[1]["text"], "real input");
+    }
+
+    #[test]
+    fn parse_codex_transcript_marks_mail_inbox_notifications_as_events() {
+        let dir = tempdir();
+        let path = write_jsonl(
+            dir.path(),
+            "rollout-mail-notification.jsonl",
+            &[
+                r#"{"type":"response_item","timestamp":"2026-04-22T10:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"📬 You have new mail from gastown/witness. Subject: Overseer sending malformed RESTART_POLECAT mail. Run 'gt mail inbox' to read."}]}}"#,
+                r#"{"type":"response_item","timestamp":"2026-04-22T10:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"real input"}]}}"#,
+            ],
+        );
+        let mut cache = CodexCache::default();
+        let view = parse_codex_transcript(&mut cache, &path);
+        let items = view["items"].as_array().expect("items array");
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["kind"], "event");
+        assert_eq!(items[0]["event_type"], "system");
+        assert!(items[0]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("You have new mail from gastown/witness"));
         assert_eq!(items[1]["kind"], "user");
         assert_eq!(items[1]["text"], "real input");
     }

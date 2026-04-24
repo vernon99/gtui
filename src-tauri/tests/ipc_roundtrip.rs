@@ -4,7 +4,7 @@
 //! tests instead build a mock Tauri app, register the real `invoke_handler`,
 //! and dispatch JSON payloads through `get_ipc_response`. That path covers:
 //!
-//! * Command registration (all nine handlers reachable by name)
+//! * Command registration (all eleven handlers reachable by name)
 //! * Argument-name wire format (JS `taskId` deserialises to Rust `task_id`)
 //! * The `Result<T, String>` <-> IPC `Ok`/`Err` envelope
 //! * Managed `SnapshotStore` state retrieval
@@ -37,6 +37,8 @@ fn build_app(store: SnapshotStore) -> App<tauri::test::MockRuntime> {
             gtui_lib::ipc::get_git_diff,
             gtui_lib::ipc::run_gt,
             gtui_lib::ipc::stop_gt,
+            gtui_lib::ipc::run_rig,
+            gtui_lib::ipc::stop_rig,
             gtui_lib::ipc::retry_task,
             gtui_lib::ipc::pause_agent,
             gtui_lib::ipc::inject_message,
@@ -161,6 +163,52 @@ fn stop_gt_routes_over_ipc() {
             .as_str()
             .unwrap_or("")
             .contains("gt down --polecats --quiet"),
+        "got: {}",
+        value["command"]
+    );
+}
+
+#[test]
+fn run_rig_routes_over_ipc() {
+    let store = SnapshotStore::new(isolated_root());
+    let app = build_app(store);
+    let webview = new_webview(&app);
+
+    let value =
+        invoke_json(&webview, "run_rig", json!({"rig": "gtui"})).expect("run_rig returns action");
+    assert_eq!(value["kind"], "run-rig");
+    assert!(
+        value["command"]
+            .as_str()
+            .unwrap_or("")
+            .contains("gt rig unpark gtui"),
+        "got: {}",
+        value["command"]
+    );
+}
+
+#[test]
+fn stop_rig_routes_over_ipc() {
+    let store = SnapshotStore::new(isolated_root());
+    let app = build_app(store);
+    let webview = new_webview(&app);
+
+    let value =
+        invoke_json(&webview, "stop_rig", json!({"rig": "gtui"})).expect("stop_rig returns action");
+    assert_eq!(value["kind"], "stop-rig");
+    assert!(
+        value["command"]
+            .as_str()
+            .unwrap_or("")
+            .contains("gt rig stop gtui"),
+        "got: {}",
+        value["command"]
+    );
+    assert!(
+        value["command"]
+            .as_str()
+            .unwrap_or("")
+            .contains("gt rig park gtui"),
         "got: {}",
         value["command"]
     );

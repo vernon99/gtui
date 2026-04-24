@@ -221,6 +221,8 @@ pub struct WorkspaceSnapshot {
     #[serde(default)]
     pub convoys: Value,
     #[serde(default)]
+    pub rigs: Vec<RigInfo>,
+    #[serde(default)]
     pub crews: Vec<Value>,
     #[serde(default)]
     pub agents: Vec<AgentInfo>,
@@ -278,6 +280,12 @@ mod tests {
             },
             git: json!({"repos": []}),
             convoys: json!({"convoys": []}),
+            rigs: vec![RigInfo {
+                name: "gtui".into(),
+                scope: "gtui".into(),
+                path: "/home/user/gt/gtui".into(),
+                extra: BTreeMap::new(),
+            }],
             crews: vec![],
             agents: vec![],
             stores: vec![],

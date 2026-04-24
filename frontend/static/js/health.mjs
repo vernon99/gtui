@@ -47,6 +47,7 @@ export function describeSnapshotHealth(snapshot, options = {}) {
   const errors = Array.isArray(snapshot?.errors) ? snapshot.errors : [];
   const degradedReasons = [];
   const downReasons = [];
+  const partialReasons = [];
   const serviceDetails = [
     `daemon: ${serviceState.daemon}`,
     `dolt: ${serviceState.dolt}`,
@@ -60,7 +61,7 @@ export function describeSnapshotHealth(snapshot, options = {}) {
 
   if (serviceState.daemon === "stopped") downReasons.push("daemon is stopped.");
   if (serviceState.dolt === "stopped") downReasons.push("dolt is stopped.");
-  if (serviceState.tmux === "stopped") downReasons.push("tmux is stopped.");
+  if (serviceState.tmux === "stopped") partialReasons.push("tmux is stopped.");
 
   const commands = errors
     .map((error) => String(error?.command || "").trim())
@@ -83,15 +84,28 @@ export function describeSnapshotHealth(snapshot, options = {}) {
   }
 
   const operational = coreServicesAreRunning(serviceState);
-  const tone = downReasons.length ? "stopped" : degradedReasons.length ? "error" : "live";
-  const label = downReasons.length ? "Stopped" : degradedReasons.length ? "Degraded" : "Live";
+  const partial = !downReasons.length && partialReasons.length > 0;
+  const tone = downReasons.length
+    ? "stopped"
+    : partial
+      ? "partial"
+      : degradedReasons.length
+        ? "error"
+        : "live";
+  const label = downReasons.length
+    ? "Stopped"
+    : partial
+      ? "Partial"
+      : degradedReasons.length
+        ? "Degraded"
+        : "Live";
 
   return {
     tone,
     label,
-    details: [...downReasons, ...degradedReasons, ...serviceDetails, ...details],
+    details: [...downReasons, ...partialReasons, ...degradedReasons, ...serviceDetails, ...details],
     operational,
     controlAction: operational ? "stop" : "run",
-    controlLabel: operational ? "Stop GT" : "Run GT",
+    controlLabel: operational ? "Stop GT" : partial ? "Restore GT" : "Run GT",
   };
 }

@@ -104,3 +104,24 @@ test("describeSnapshotHealth reports stopped when core services are stopped", ()
   assert.match(health.details.join("\n"), /daemon is stopped/);
   assert.match(health.details.join("\n"), /tmux is stopped/);
 });
+
+test("describeSnapshotHealth reports partial when only tmux is stopped", () => {
+  const health = describeSnapshotHealth({
+    status: {
+      raw: "Town: gt",
+      services: [
+        "daemon (PID 1)",
+        "dolt (PID 2, :3307, ~/gt/.dolt-data)",
+        "tmux (-L gt-abc, PID 0, 0 sessions, /tmp/tmux-501/gt-abc)",
+      ],
+    },
+    errors: [],
+  });
+
+  assert.equal(health.tone, "partial");
+  assert.equal(health.label, "Partial");
+  assert.equal(health.operational, false);
+  assert.equal(health.controlAction, "run");
+  assert.equal(health.controlLabel, "Restore GT");
+  assert.match(health.details.join("\n"), /tmux is stopped/);
+});

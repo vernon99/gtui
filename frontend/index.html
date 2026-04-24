@@ -41,18 +41,29 @@
           <button id="tab-button-misc" class="surface-tab" type="button" role="tab" aria-selected="false" aria-controls="tab-misc" data-tab-target="misc">Misc</button>
         </div>
         <div class="toolbar control-surface-toolbar">
-          <button id="gt-control-button" type="button" hidden>Run GT</button>
+          <button id="gt-control-button" class="gt-control-button" type="button" hidden>Run GT</button>
           <div class="live-pill" id="live-pill" tabindex="0" aria-describedby="live-pill-tooltip">
             <span class="pulse"></span>
             <span id="live-label">Booting</span>
             <div class="pill-tooltip" id="live-pill-tooltip" role="tooltip"></div>
           </div>
-          <label class="filter-group" for="scope-select">
-            <span>Rig</span>
-            <select id="scope-select">
-              <option value="all">All</option>
-            </select>
-          </label>
+          <div class="filter-group rig-filter" id="scope-dropdown">
+            <span id="scope-dropdown-label">Rig</span>
+            <div class="app-dropdown" id="scope-menu-root">
+              <button
+                id="scope-menu-button"
+                class="app-dropdown-trigger"
+                type="button"
+                aria-haspopup="menu"
+                aria-expanded="false"
+                aria-labelledby="scope-dropdown-label scope-menu-value"
+              >
+                <span id="scope-menu-value">All</span>
+                <span class="app-dropdown-caret" aria-hidden="true"></span>
+              </button>
+              <div id="scope-menu" class="app-dropdown-menu" role="menu" hidden></div>
+            </div>
+          </div>
           <button id="refresh-button" type="button">Refresh now</button>
         </div>
       </div>
