@@ -63,6 +63,7 @@ import {
       primarySending: false,
       gtControlInFlight: false,
       gtControlAction: "",
+      activeTab: "mayor",
       bootStartedMs: Date.now(),
       lastSuccessMs: 0,
       inFlight: false,
@@ -106,6 +107,31 @@ import {
     }
 
     bindWindowControls();
+
+    function syncTabs() {
+      document.querySelectorAll("[data-tab-target]").forEach((button) => {
+        const active = button.dataset.tabTarget === app.activeTab;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-selected", active ? "true" : "false");
+        button.tabIndex = active ? 0 : -1;
+      });
+      document.querySelectorAll("[data-tab-panel]").forEach((panel) => {
+        const active = panel.dataset.tabPanel === app.activeTab;
+        panel.hidden = !active;
+        panel.classList.toggle("active", active);
+      });
+      document.body.classList.toggle("mayor-tab-active", app.activeTab === "mayor");
+      if (app.activeTab === "mayor") {
+        window.requestAnimationFrame(() => restorePrimaryLogState());
+      }
+    }
+
+    function selectTab(tab) {
+      const panel = [...document.querySelectorAll("[data-tab-panel]")].find((item) => item.dataset.tabPanel === tab);
+      if (!panel) return;
+      app.activeTab = tab;
+      syncTabs();
+    }
 
     function formatTime(value) {
       if (!value) return "Unknown";
@@ -715,6 +741,7 @@ import {
             ${tmuxDown ? ` GT tmux is currently stopped, so live pane capture is unavailable.` : ""}
           </div>
         `;
+        renderMayorEvents();
         return;
       }
 
@@ -726,6 +753,7 @@ import {
             Loading primary terminal state for ${esc(targetAgent.target)}.
           </div>
         `;
+        renderMayorEvents();
         return;
       }
 
@@ -743,45 +771,12 @@ import {
             : (tmuxErrorText
                 ? "Live terminal unavailable: tmux capture failed during this poll."
                 : "No pane log stream available for this terminal right now."));
-      const recentEvents = agent.events?.length
-        ? `<div class="event-list">${agent.events.slice(-6).map((event) => `
-            <div class="event-item">
-              <div class="event-time">${esc(event.time || "")}</div>
-              <div><strong>${esc(event.symbol || "·")}</strong> ${esc(event.message || event.raw || "")}</div>
-            </div>
-          `).join("")}</div>`
-        : `<div class="empty">${tmuxDown ? "No recent controller events while GT tmux is down." : "No recent GT events for this controller."}</div>`;
-      const polecats = buildAgentRoster("polecat");
-      const polecatSummary = formatRosterSummary(polecats, "polecat", "polecats", {
-        attached: "hooked",
-        idle: "idle",
-        noSession: "no session",
-      });
-      const polecatSurface = polecats.length
-        ? `
-            <div class="subtle">${esc(polecatSummary)}</div>
-            <div class="roster-grid terminal-roster-grid">${renderRosterCards(polecats)}</div>
-          `
-        : `
-            <div class="subtle">${esc(polecatSummary)}</div>
-            <div class="empty">No polecats visible for the current scope.</div>
-          `;
-      const alerts = app.snapshot?.alerts || [];
-      const alertsSurface = alerts.length
-        ? `
-            <div class="card">
-              <h3>Attention</h3>
-              <div class="subtle">High-signal conditions worth reading first.</div>
-              <div class="alert-list" style="margin-top: 12px;">${alerts.map((alert) => `<div class="alert-item">${esc(alert)}</div>`).join("")}</div>
-            </div>
-          `
-        : "";
       app.primaryTerminalRenderedKey = buildPrimaryTerminalDataKey(agent);
 
       summaryHost.textContent = `${agent.target} · ${agent.role} · ${usesTranscript ? transcriptLabel(transcriptView) : "terminal"} · ${scopeLabel}${serviceNotes.length ? ` · ${serviceNotes.join(" · ")}` : ""}${fallbackNote ? ` · ${fallbackNote}` : ""}`;
       host.innerHTML = `
         <div class="terminal-shell">
-          <div class="card">
+          <div class="card mayor-terminal-card">
             <div class="agent-top">
               <div>
                 <div class="feed-title">${esc(primarySurfaceHeading(agent))}</div>
@@ -804,7 +799,7 @@ import {
             ${usesTranscript
               ? renderPrimaryTranscript(transcriptView, { openDetails: app.openDetails })
               : `<pre id="primary-terminal-log" class="log-block primary-log-block" style="margin-top:12px;">${esc(terminalText)}</pre>`}
-            <div class="stack" style="margin-top:12px;">
+            <div class="stack primary-composer" style="margin-top:12px;">
               <label class="subtle" for="primary-inject-message">Write to ${esc(agent.target)}</label>
               <textarea
                 id="primary-inject-message"
@@ -817,22 +812,40 @@ import {
               </div>
             </div>
           </div>
-          ${alertsSurface}
-        </div>
-        <div class="terminal-meta">
-          <div class="card">
-            <h3>Polecats</h3>
-            ${polecatSurface}
-          </div>
-          <div class="card">
-            <h3>Recent Events</h3>
-            ${recentEvents}
-          </div>
         </div>
       `;
+      renderMayorEvents();
       restorePrimaryLogState();
       restoreTmuxLogStates(host);
       restorePrimaryComposerState(composerState);
+    }
+
+    function renderMayorEvents() {
+      const host = document.getElementById("mayor-events-panel");
+      if (!host) return;
+      const agent = getPrimaryTerminalViewAgent() || getPrimaryTerminalAgent();
+      const events = agent?.events || [];
+      if (!agent) {
+        host.innerHTML = `<div class="empty">No controller events are available yet.</div>`;
+        return;
+      }
+      host.innerHTML = events.length
+        ? `<div class="event-list">${events.slice(-12).map((event) => `
+            <div class="event-item">
+              <div class="event-time">${esc(event.time || "")}</div>
+              <div><strong>${esc(event.symbol || "·")}</strong> ${esc(event.message || event.raw || "")}</div>
+            </div>
+          `).join("")}</div>`
+        : `<div class="empty">No recent GT events for this controller.</div>`;
+    }
+
+    function renderAlerts() {
+      const host = document.getElementById("alerts-panel");
+      if (!host) return;
+      const alerts = app.snapshot?.alerts || [];
+      host.innerHTML = alerts.length
+        ? `<div class="alert-list">${alerts.map((alert) => `<div class="alert-item">${esc(alert)}</div>`).join("")}</div>`
+        : `<div class="empty">No attention items in the current snapshot.</div>`;
     }
 
     function estimateNodeMetrics(nodes) {
@@ -1410,6 +1423,26 @@ import {
       }).join("");
     }
 
+    function renderPolecats() {
+      const host = document.getElementById("polecat-roster");
+      captureTmuxLogStates(host);
+      const roster = buildAgentRoster("polecat");
+      document.getElementById("polecat-summary").textContent =
+        formatRosterSummary(roster, "polecat", "polecats", {
+          attached: "hooked",
+          idle: "idle",
+          noSession: "no session",
+        });
+
+      if (!roster.length) {
+        host.innerHTML = `<div class="empty">No polecats visible for the current scope.</div>`;
+        return;
+      }
+
+      host.innerHTML = renderRosterCards(roster);
+      restoreTmuxLogStates(host);
+    }
+
     function renderAgentRoster() {
       const host = document.getElementById("agent-roster");
       captureTmuxLogStates(host);
@@ -1791,6 +1824,8 @@ returncode: ${esc(error.returncode ?? "")}</pre>
       document.getElementById("graph-svg").innerHTML = "";
       document.getElementById("graph-nodes").innerHTML = `<div class="empty loading-empty" style="margin: 18px;">Task spine is loading from GT and bead stores.</div>`;
       document.getElementById("focus-panel").innerHTML = `<div class="empty loading-empty">Focus controls will appear with the first snapshot.</div>`;
+      document.getElementById("polecat-summary").textContent = "loading";
+      document.getElementById("polecat-roster").innerHTML = `<div class="empty loading-empty">Polecat roster is loading.</div>`;
       document.getElementById("agent-summary").textContent = "loading";
       document.getElementById("agent-roster").innerHTML = `<div class="empty loading-empty">Agent roster is loading.</div>`;
       document.getElementById("feed-summary").textContent = "loading";
@@ -1804,6 +1839,8 @@ returncode: ${esc(error.returncode ?? "")}</pre>
       document.getElementById("status-panel").innerHTML = `<div class="empty loading-empty">Status legend is loading.</div>`;
       document.getElementById("raw-status").textContent = "Waiting for gt status output...";
       document.getElementById("raw-vitals").textContent = "Waiting for gt vitals output...";
+      document.getElementById("mayor-events-panel").innerHTML = `<div class="empty loading-empty">Mayor events are loading.</div>`;
+      document.getElementById("alerts-panel").innerHTML = `<div class="empty loading-empty">Attention items are loading.</div>`;
       renderActions(snapshot?.actions || []);
       renderErrors([]);
       updateControlSurfaceState(snapshot || {});
@@ -1816,9 +1853,12 @@ returncode: ${esc(error.returncode ?? "")}</pre>
       ensureSelection();
       renderChrome(app.snapshot);
       if (!freezePrimary) renderPrimaryTerminal();
+      renderMayorEvents();
+      renderAlerts();
       renderMetrics();
       renderGraph();
       renderFocus();
+      renderPolecats();
       renderAgentRoster();
       renderFeed();
       renderGit();
@@ -1969,6 +2009,23 @@ returncode: ${esc(error.returncode ?? "")}</pre>
         showToast(String(error), false);
       }
     }
+
+    document.querySelectorAll("[data-tab-target]").forEach((button) => {
+      button.addEventListener("click", () => selectTab(button.dataset.tabTarget));
+      button.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const tabs = [...document.querySelectorAll("[data-tab-target]")];
+        const current = tabs.indexOf(button);
+        const nextIndex =
+          event.key === "Home" ? 0 :
+          event.key === "End" ? tabs.length - 1 :
+          event.key === "ArrowLeft" ? (current - 1 + tabs.length) % tabs.length :
+          (current + 1) % tabs.length;
+        tabs[nextIndex]?.focus();
+        selectTab(tabs[nextIndex]?.dataset.tabTarget || "mayor");
+      });
+    });
 
     document.getElementById("refresh-button").addEventListener("click", () => fetchSnapshot(true));
     document.getElementById("gt-control-button").addEventListener("click", async (event) => {
@@ -2226,6 +2283,7 @@ returncode: ${esc(error.returncode ?? "")}</pre>
       if (button) button.click();
     });
 
+    syncTabs();
     initGraphPan();
     renderLoadingState();
     fetchSnapshot(true).then(() => {
