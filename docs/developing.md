@@ -122,6 +122,20 @@ This sets `GTUI_OPEN_DEVTOOLS=1` and launches the real app. On macOS, Tauri's
 desktop WebDriver path is not available because WKWebView has no desktop
 WebDriver driver; use the Web Inspector for native frontend inspection.
 
+## Native Window Screenshots
+
+When checking the live Tauri UI, capture the GTUI window itself instead of the
+whole desktop or a screen rectangle:
+
+```bash
+scripts/capture_gtui_window.sh logs/gtui-window.png
+```
+
+The helper resolves the CoreGraphics window id for the `GTUI` window titled
+`Gas Town Dashboard` and runs `screencapture -l <window-id>`. Prefer this for
+visual verification because `screencapture -R ...` only captures a screen
+rectangle and will include any frontmost window that overlaps GTUI.
+
 ## README Screenshots
 
 README screenshots are rendered from isolated frontend fixtures, not from a

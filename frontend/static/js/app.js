@@ -23,6 +23,7 @@ import {
     syncWindowChrome();
 
     const { invoke } = window.__TAURI__.core;
+    const currentWindow = window.__TAURI__.window?.getCurrentWindow?.() ?? null;
 
     const PRIMARY_TERMINAL_FETCH_TIMEOUT_MS = 6000;
     const PRIMARY_SELECTION_FREEZE_MS = 2500;
@@ -82,6 +83,29 @@ import {
       { key: "active_polecats", label: "Polecats", cls: "accent-memory", sub: (v) => `${v} worker cats visible` },
       { key: "command_errors", label: "Errors", cls: "accent-stuck", sub: (v) => v ? "poll degraded" : "clean polling cycle" },
     ];
+
+    function bindWindowControls() {
+      const bind = (id, handler) => {
+        const element = document.getElementById(id);
+        if (!element) return;
+        element.addEventListener("click", async (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (!currentWindow) return;
+          try {
+            await handler();
+          } catch (error) {
+            console.error(`window control ${id} failed`, error);
+          }
+        });
+      };
+
+      bind("window-close", () => currentWindow.close());
+      bind("window-minimize", () => currentWindow.minimize());
+      bind("window-zoom", () => currentWindow.toggleMaximize());
+    }
+
+    bindWindowControls();
 
     function formatTime(value) {
       if (!value) return "Unknown";

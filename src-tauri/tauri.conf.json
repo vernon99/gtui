@@ -11,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Gas Town UI",
+        "title": "Gas Town Dashboard",
         "width": 1400,
         "height": 900,
         "minWidth": 900,
@@ -21,8 +21,8 @@
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "trafficLightPosition": {
-          "x": 20,
-          "y": 20
+          "x": -1000,
+          "y": -1000
         }
       }
     ],

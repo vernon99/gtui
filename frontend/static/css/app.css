@@ -90,7 +90,7 @@
 
     .shell {
       width: min(1680px, calc(100% - 28px));
-      margin: 14px auto 26px;
+      margin: 0 auto 26px;
     }
 
     .app-chrome {
@@ -99,19 +99,86 @@
 
     .tauri-macos .app-chrome {
       display: grid;
-      grid-template-columns: minmax(120px, 1fr) auto minmax(120px, 1fr);
+      grid-template-columns: minmax(180px, 1fr) auto minmax(180px, 1fr);
       align-items: center;
-      height: 72px;
-      padding: 0 24px;
+      height: 44px;
+      padding: 0 18px;
       color: rgba(242, 234, 220, 0.78);
       user-select: none;
     }
 
+    .app-chrome-start {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .app-window-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex: none;
+    }
+
+    .app-window-control {
+      width: 14px;
+      height: 14px;
+      padding: 0;
+      border: 0;
+      border-radius: 999px;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+      cursor: pointer;
+      transition: transform 120ms ease, filter 120ms ease;
+    }
+
+    .app-window-control:hover {
+      transform: scale(1.06);
+      filter: brightness(1.06);
+    }
+
+    .app-window-control:hover:enabled {
+      border: 0;
+    }
+
+    .app-window-control.close {
+      background: #ff5f57;
+    }
+
+    .app-window-control.close:hover:enabled {
+      background: #ff5f57;
+    }
+
+    .app-window-control.minimize {
+      background: #febc2e;
+    }
+
+    .app-window-control.minimize:hover:enabled {
+      background: #febc2e;
+    }
+
+    .app-window-control.zoom {
+      background: #28c840;
+    }
+
+    .app-window-control.zoom:hover:enabled {
+      background: #28c840;
+    }
+
+    .app-chrome-drag {
+      min-width: 0;
+      flex: 1 1 auto;
+      align-self: stretch;
+    }
+
     .app-chrome-title {
       grid-column: 2;
+      font-size: 0.9rem;
       font-weight: 800;
       letter-spacing: 0.08em;
       line-height: 1;
+      transform: translateY(2px);
+      text-align: center;
       pointer-events: none;
     }
 
