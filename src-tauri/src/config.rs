@@ -8,7 +8,19 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// Snapshot poll cadence.
-pub const POLL_INTERVAL: Duration = Duration::from_millis(2_000);
+pub const POLL_INTERVAL: Duration = Duration::from_millis(5_000);
+
+/// Maximum staleness for DB-backed snapshot sections that are expensive to
+/// rebuild on every poll. Live agent/session data still refreshes every poll.
+pub const DB_BACKED_COLLECTION_TTL: Duration = Duration::from_secs(10);
+
+/// Maximum staleness for git-memory collection. Git memory shells out across
+/// every discovered repo, so it should not rebuild on every snapshot poll.
+pub const GIT_MEMORY_TTL: Duration = Duration::from_secs(10);
+
+/// Maximum staleness for the primary terminal view. User writes invalidate the
+/// relevant target immediately; idle polling can tolerate a short lag.
+pub const TERMINAL_STATE_TTL: Duration = Duration::from_secs(5);
 
 /// Default per-command timeout for `run_command`. Individual call sites may
 /// override this (e.g. `gt polecat list --all --json` uses 6s).
@@ -111,7 +123,10 @@ mod tests {
 
     #[test]
     fn constants_match_runtime_defaults() {
-        assert_eq!(POLL_INTERVAL, Duration::from_secs(2));
+        assert_eq!(POLL_INTERVAL, Duration::from_secs(5));
+        assert_eq!(DB_BACKED_COLLECTION_TTL, Duration::from_secs(10));
+        assert_eq!(GIT_MEMORY_TTL, Duration::from_secs(10));
+        assert_eq!(TERMINAL_STATE_TTL, Duration::from_secs(5));
         assert_eq!(DEFAULT_COMMAND_TIMEOUT, Duration::from_secs(3));
         assert_eq!(GT_STATUS_TIMEOUT, Duration::from_secs(30));
         assert_eq!(CODEX_ROLLOUT_LIST_TTL, Duration::from_secs(3));

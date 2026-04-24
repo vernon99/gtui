@@ -26,6 +26,8 @@ import {
     const currentWindow = window.__TAURI__.window?.getCurrentWindow?.() ?? null;
 
     const PRIMARY_TERMINAL_FETCH_TIMEOUT_MS = 6000;
+    const PRIMARY_TERMINAL_POLL_MS = 5000;
+    const SNAPSHOT_POLL_MS = 5000;
     const PRIMARY_SELECTION_FREEZE_MS = 2500;
 
     const app = {
@@ -1733,7 +1735,7 @@ returncode: ${esc(error.returncode ?? "")}</pre>
       document.getElementById("footer-right").textContent =
         `${snapshot.status?.town || "Town"} · ${scopeLabel} · ${snapshot.status?.overseer || "no overseer parsed"}`;
       document.getElementById("footer-left").textContent =
-        `Polling every second · gt ${snapshot.timings?.gt_commands_ms || 0} ms · agents ${snapshot.timings?.agent_commands_ms || 0} ms · bd ${snapshot.timings?.bd_commands_ms || 0} ms · git ${snapshot.timings?.git_commands_ms || 0} ms`;
+        `Polling every ${SNAPSHOT_POLL_MS / 1000}s · gt ${snapshot.timings?.gt_commands_ms || 0} ms · agents ${snapshot.timings?.agent_commands_ms || 0} ms · bd ${snapshot.timings?.bd_commands_ms || 0} ms · git ${snapshot.timings?.git_commands_ms || 0} ms`;
     }
 
     function getSnapshotHealth(snapshot) {
@@ -2292,5 +2294,5 @@ returncode: ${esc(error.returncode ?? "")}</pre>
     window.setInterval(() => {
       if (!app.lastSuccessMs) renderLoadingState(app.snapshot);
     }, 1000);
-    window.setInterval(() => fetchPrimaryTerminal(false), 1000);
-    window.setInterval(() => fetchSnapshot(false), 4000);
+    window.setInterval(() => fetchPrimaryTerminal(false), PRIMARY_TERMINAL_POLL_MS);
+    window.setInterval(() => fetchSnapshot(false), SNAPSHOT_POLL_MS);

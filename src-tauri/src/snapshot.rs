@@ -19,7 +19,9 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use crate::command::{display_command, run_command, RunOptions};
-use crate::config::{GT_STATUS_TIMEOUT, POLL_INTERVAL};
+use crate::config::{
+    DB_BACKED_COLLECTION_TTL, GIT_MEMORY_TTL, GT_STATUS_TIMEOUT, POLL_INTERVAL, TERMINAL_STATE_TTL,
+};
 use crate::models::{
     default_status_legend, Activity, ActivityGroup, AgentInfo, Metrics, StatusSummary, Timings,
     WorkspaceSnapshot,
@@ -81,6 +83,46 @@ struct SnapshotState {
     last_fingerprint: u64,
 }
 
+#[derive(Debug, Default)]
+struct SnapshotIoCache {
+    bead_stores: Option<CachedBeadStoreCollection>,
+    convoys: Option<CachedConvoyCollection>,
+    git_memory: Option<CachedGitMemoryCollection>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedBeadStoreCollection {
+    stores: Vec<BeadStore>,
+    collected_at: Instant,
+    summaries: Vec<Value>,
+    snapshots: Vec<BeadStoreSnapshot>,
+    errors: Vec<Value>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedConvoyCollection {
+    gt_root: PathBuf,
+    collected_at: Instant,
+    convoys: Value,
+    errors: Vec<Value>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedGitMemoryCollection {
+    gt_root: PathBuf,
+    crews_key: Vec<(String, String, String)>,
+    merge_links: Vec<Value>,
+    collected_at: Instant,
+    git_memory: GitMemory,
+    errors: Vec<Value>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedTerminalState {
+    captured_at: Instant,
+    state: Value,
+}
+
 /// Shared inner state reachable from both the background poller and the
 /// command handlers. Kept separate from the outer `SnapshotStore` so that the
 /// public handle can be cheaply cloned.
@@ -91,6 +133,8 @@ pub struct SnapshotStoreInner {
     codex_cache: Mutex<CodexCache>,
     claude_cache: Mutex<ClaudeCache>,
     git_diff_cache: Mutex<HashMap<(String, String), CachedGitDiff>>,
+    io_cache: Mutex<SnapshotIoCache>,
+    terminal_cache: Mutex<HashMap<String, CachedTerminalState>>,
     shutdown: Notify,
 }
 
@@ -131,6 +175,8 @@ impl SnapshotStore {
                 codex_cache: Mutex::new(CodexCache::default()),
                 claude_cache: Mutex::new(ClaudeCache::default()),
                 git_diff_cache: Mutex::new(HashMap::new()),
+                io_cache: Mutex::new(SnapshotIoCache::default()),
+                terminal_cache: Mutex::new(HashMap::new()),
                 shutdown: Notify::new(),
             }),
         }
@@ -183,7 +229,8 @@ impl SnapshotStore {
     pub async fn refresh_once(&self) -> bool {
         let history = self.action_history();
         let previous = self.get();
-        let mut snapshot = build_snapshot(&self.inner.gt_root, &history).await;
+        let mut snapshot =
+            build_snapshot_with_cache(&self.inner.gt_root, &history, &self.inner.io_cache).await;
         stabilize_snapshot(&previous, &mut snapshot);
         self.install_snapshot(snapshot)
     }
@@ -275,6 +322,55 @@ impl SnapshotStore {
             .lock()
             .expect("git diff cache lock poisoned")
             .clear();
+    }
+
+    fn invalidate_io_cache(&self) {
+        *self
+            .inner
+            .io_cache
+            .lock()
+            .expect("snapshot io cache lock poisoned") = SnapshotIoCache::default();
+    }
+
+    fn cached_terminal_state(&self, target: &str) -> Option<Value> {
+        let cache = self
+            .inner
+            .terminal_cache
+            .lock()
+            .expect("terminal cache lock poisoned");
+        let cached = cache.get(target)?;
+        if cached.captured_at.elapsed() <= TERMINAL_STATE_TTL {
+            Some(cached.state.clone())
+        } else {
+            None
+        }
+    }
+
+    fn cache_terminal_state(&self, target: &str, state: Value) {
+        self.inner
+            .terminal_cache
+            .lock()
+            .expect("terminal cache lock poisoned")
+            .insert(
+                target.to_string(),
+                CachedTerminalState {
+                    captured_at: Instant::now(),
+                    state,
+                },
+            );
+    }
+
+    fn invalidate_terminal_cache(&self, target: Option<&str>) {
+        let mut cache = self
+            .inner
+            .terminal_cache
+            .lock()
+            .expect("terminal cache lock poisoned");
+        if let Some(target) = target {
+            cache.remove(target);
+        } else {
+            cache.clear();
+        }
     }
 
     /// Expose a temporarily-borrowed Codex cache for callers in the sessions
@@ -462,6 +558,10 @@ impl SnapshotStore {
             "timestamp": now_iso(),
         });
         self.record_action(action.clone());
+        if result.ok {
+            self.invalidate_io_cache();
+            self.invalidate_terminal_cache(Some(target));
+        }
         let _ = self.refresh_once().await;
         Ok(action)
     }
@@ -496,6 +596,10 @@ impl SnapshotStore {
             "timestamp": now_iso(),
         });
         self.record_action(action.clone());
+        if result.ok {
+            self.invalidate_io_cache();
+            self.invalidate_terminal_cache(Some(target));
+        }
         let _ = self.refresh_once().await;
         Ok(action)
     }
@@ -554,6 +658,10 @@ impl SnapshotStore {
             "timestamp": now_iso(),
         });
         self.record_action(action.clone());
+        if result.ok {
+            self.invalidate_io_cache();
+            self.invalidate_terminal_cache(None);
+        }
         let _ = self.refresh_once().await;
         Ok(action)
     }
@@ -584,11 +692,23 @@ impl SnapshotStore {
         .await
     }
 
-    /// Implementation of `SnapshotStore.get_terminal_state`. Performs a live tmux
-    /// rediscovery merge, picks Codex or Claude transcripts when available, and
-    /// otherwise falls back to a captured pane transcript. Refreshes events
-    /// with a fresh `gt feed --since 5m` filtered by target.
+    /// Implementation of `SnapshotStore.get_terminal_state`. Returns a cached
+    /// terminal view while it is fresh; user writes and control actions
+    /// invalidate the relevant entries immediately.
     pub async fn get_terminal_state(&self, target: &str) -> Result<Value, String> {
+        if let Some(state) = self.cached_terminal_state(target) {
+            return Ok(state);
+        }
+        let state = self.build_terminal_state(target).await?;
+        self.cache_terminal_state(target, state.clone());
+        Ok(state)
+    }
+
+    /// Performs a live tmux rediscovery merge, picks Codex or Claude
+    /// transcripts when available, and otherwise falls back to a captured pane
+    /// transcript. Refreshes events with a fresh `gt feed --since 5m` filtered
+    /// by target.
+    async fn build_terminal_state(&self, target: &str) -> Result<Value, String> {
         let agent = self
             .discover_agent(target)
             .await
@@ -1037,6 +1157,7 @@ impl SnapshotStore {
             return Err(err);
         }
 
+        self.invalidate_terminal_cache(Some(target));
         let terminal = self.get_terminal_state(target).await?;
         let action = json!({
             "kind": "write-terminal",
@@ -1082,6 +1203,10 @@ impl SnapshotStore {
             "timestamp": now_iso(),
         });
         self.record_action(action.clone());
+        if result.ok {
+            self.invalidate_io_cache();
+            self.invalidate_terminal_cache(None);
+        }
         let _ = self.refresh_once().await;
         Ok(action)
     }
@@ -1247,6 +1372,22 @@ fn action_output(result: &crate::command::CommandResult) -> String {
 /// (agents / beads / git / convoys / graph) are placeholder `Value::Null`
 /// shapes pending dedicated ports.
 pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> WorkspaceSnapshot {
+    build_snapshot_internal(gt_root, action_history, None).await
+}
+
+async fn build_snapshot_with_cache(
+    gt_root: &Path,
+    action_history: &[Value],
+    io_cache: &Mutex<SnapshotIoCache>,
+) -> WorkspaceSnapshot {
+    build_snapshot_internal(gt_root, action_history, Some(io_cache)).await
+}
+
+async fn build_snapshot_internal(
+    gt_root: &Path,
+    action_history: &[Value],
+    io_cache: Option<&Mutex<SnapshotIoCache>>,
+) -> WorkspaceSnapshot {
     let started = Instant::now();
 
     // Three independent top-level phases run in parallel:
@@ -1290,15 +1431,25 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
             ),
         )
     };
+    let bead_stores_future = async {
+        if let Some(cache) = io_cache {
+            collect_bead_store_summaries_cached(&bead_stores, cache).await
+        } else {
+            collect_bead_store_summaries(&bead_stores).await
+        }
+    };
+    let convoy_future = async {
+        if let Some(cache) = io_cache {
+            collect_convoy_data_cached(gt_root, cache).await
+        } else {
+            collect_convoy_data(gt_root).await
+        }
+    };
     let (
         (status_result, vitals_result, crew_list_result, crew_status_result, feed_result),
         (store_summaries, bead_store_snapshots, store_errors, bead_ms),
         (convoys, convoy_errors, convoy_ms),
-    ) = tokio::join!(
-        gt_commands_future,
-        collect_bead_store_summaries(&bead_stores),
-        collect_convoy_data(gt_root),
-    );
+    ) = tokio::join!(gt_commands_future, bead_stores_future, convoy_future,);
 
     let mut errors: Vec<Value> = Vec::new();
     for result in [
@@ -1369,8 +1520,15 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
     errors.extend(store_errors);
     errors.extend(convoy_errors);
 
-    let (agents, hook_by_issue, agent_errors, agent_ms) =
-        collect_agents(gt_root, &status_summary, &crews, &feed_events).await;
+    let hook_by_agent = build_hook_index(&bead_store_snapshots);
+    let (agents, hook_by_issue, agent_errors, agent_ms) = collect_agents(
+        gt_root,
+        &status_summary,
+        &crews,
+        &feed_events,
+        &hook_by_agent,
+    )
+    .await;
     errors.extend(agent_errors);
 
     // Fold the raw per-store snapshots into compacted graph nodes/edges,
@@ -1382,8 +1540,11 @@ pub async fn build_snapshot(gt_root: &Path, action_history: &[Value]) -> Workspa
     // Git memory: walk the town root + crew worktrees, fan out the four git
     // commands per repo, and fold commit history + merge beads into a per-task
     // memory index.
-    let (git_memory, git_errors, git_ms) =
-        collect_git_memory(gt_root, &crews, &bead_data.merge_links).await;
+    let (git_memory, git_errors, git_ms) = if let Some(cache) = io_cache {
+        collect_git_memory_cached(gt_root, &crews, &bead_data.merge_links, cache).await
+    } else {
+        collect_git_memory(gt_root, &crews, &bead_data.merge_links).await
+    };
     errors.extend(git_errors);
 
     // Layer linked commits, commit nodes/edges, and the "interesting" filter
@@ -1689,6 +1850,74 @@ fn issue_ids_set(issues: &[Value]) -> std::collections::HashSet<String> {
         .collect()
 }
 
+fn raw_issue_timestamp<'a>(issue: &'a Value, snake_key: &str, camel_key: &str) -> &'a str {
+    issue
+        .get(snake_key)
+        .and_then(Value::as_str)
+        .or_else(|| issue.get(camel_key).and_then(Value::as_str))
+        .unwrap_or("")
+}
+
+fn prefer_hook_candidate(existing: &Value, candidate: &Value) -> bool {
+    let existing_updated = raw_issue_timestamp(existing, "updated_at", "updatedAt");
+    let candidate_updated = raw_issue_timestamp(candidate, "updated_at", "updatedAt");
+    if candidate_updated != existing_updated {
+        return candidate_updated > existing_updated;
+    }
+
+    let existing_created = raw_issue_timestamp(existing, "created_at", "createdAt");
+    let candidate_created = raw_issue_timestamp(candidate, "created_at", "createdAt");
+    candidate_created > existing_created
+}
+
+fn hook_payload_from_issue(agent: &str, issue: &Value) -> Option<Value> {
+    let bead_id = issue.get("id").and_then(Value::as_str).unwrap_or("");
+    if bead_id.is_empty() {
+        return None;
+    }
+    let title = issue.get("title").and_then(Value::as_str).unwrap_or("");
+    let status = issue
+        .get("status")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("hooked");
+    Some(json!({
+        "agent": agent,
+        "bead_id": bead_id,
+        "title": title,
+        "status": status,
+    }))
+}
+
+fn build_hook_index(store_snapshots: &[BeadStoreSnapshot]) -> HashMap<String, Value> {
+    let mut issue_by_agent: HashMap<String, Value> = HashMap::new();
+    for snapshot in store_snapshots {
+        for issue in &snapshot.hooked {
+            let assignee = issue
+                .get("assignee")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if assignee.is_empty() {
+                continue;
+            }
+            match issue_by_agent.get(assignee) {
+                Some(existing) if !prefer_hook_candidate(existing, issue) => {}
+                _ => {
+                    issue_by_agent.insert(assignee.to_string(), issue.clone());
+                }
+            }
+        }
+    }
+
+    issue_by_agent
+        .into_iter()
+        .filter_map(|(agent, issue)| {
+            hook_payload_from_issue(&agent, &issue).map(|payload| (agent, payload))
+        })
+        .collect()
+}
+
 /// Raw `bd ...` results gathered for a single store. Kept around so downstream
 /// collectors (`collect_bead_data`, port pending as gui-cqe.6) can reuse the
 /// `bd list --all` / `bd blocked` / `bd list --status=hooked` payloads without
@@ -1763,7 +1992,7 @@ async fn collect_bead_store_summaries(
             )
             .await;
             let hooked_result = run_command(
-                &["bd", "list", "--status=hooked", "--json"],
+                &["bd", "list", "--status=hooked", "--json", "--limit", "0"],
                 &store.path,
                 RunOptions::default()
                     .with_timeout(Duration::from_secs(4))
@@ -1948,6 +2177,39 @@ async fn collect_bead_store_summaries(
             .unwrap_or(usize::MAX)
     });
 
+    (summaries, snapshots, errors, duration_ms)
+}
+
+async fn collect_bead_store_summaries_cached(
+    stores: &[BeadStore],
+    cache: &Mutex<SnapshotIoCache>,
+) -> (Vec<Value>, Vec<BeadStoreSnapshot>, Vec<Value>, u64) {
+    {
+        let cache = cache.lock().expect("snapshot io cache lock poisoned");
+        if let Some(cached) = &cache.bead_stores {
+            if cached.stores == stores && cached.collected_at.elapsed() <= DB_BACKED_COLLECTION_TTL
+            {
+                return (
+                    cached.summaries.clone(),
+                    cached.snapshots.clone(),
+                    cached.errors.clone(),
+                    0,
+                );
+            }
+        }
+    }
+
+    let (summaries, snapshots, errors, duration_ms) = collect_bead_store_summaries(stores).await;
+    {
+        let mut cache = cache.lock().expect("snapshot io cache lock poisoned");
+        cache.bead_stores = Some(CachedBeadStoreCollection {
+            stores: stores.to_vec(),
+            collected_at: Instant::now(),
+            summaries: summaries.clone(),
+            snapshots: snapshots.clone(),
+            errors: errors.clone(),
+        });
+    }
     (summaries, snapshots, errors, duration_ms)
 }
 
@@ -2528,6 +2790,67 @@ impl GitMemory {
     }
 }
 
+fn git_memory_crews_key(crews: &[Value]) -> Vec<(String, String, String)> {
+    let mut key: Vec<(String, String, String)> = crews
+        .iter()
+        .map(|crew| {
+            let path = crew
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let rig = crew
+                .get("rig")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let name = crew
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            (path, rig, name)
+        })
+        .collect();
+    key.sort();
+    key
+}
+
+async fn collect_git_memory_cached(
+    gt_root: &Path,
+    crews: &[Value],
+    merge_links: &[Value],
+    cache: &Mutex<SnapshotIoCache>,
+) -> (GitMemory, Vec<Value>, u64) {
+    let crews_key = git_memory_crews_key(crews);
+    {
+        let cache = cache.lock().expect("snapshot io cache lock poisoned");
+        if let Some(cached) = &cache.git_memory {
+            if cached.gt_root == gt_root
+                && cached.crews_key == crews_key
+                && cached.merge_links == merge_links
+                && cached.collected_at.elapsed() <= GIT_MEMORY_TTL
+            {
+                return (cached.git_memory.clone(), cached.errors.clone(), 0);
+            }
+        }
+    }
+
+    let (git_memory, errors, duration_ms) = collect_git_memory(gt_root, crews, merge_links).await;
+    {
+        let mut cache = cache.lock().expect("snapshot io cache lock poisoned");
+        cache.git_memory = Some(CachedGitMemoryCollection {
+            gt_root: gt_root.to_path_buf(),
+            crews_key,
+            merge_links: merge_links.to_vec(),
+            collected_at: Instant::now(),
+            git_memory: git_memory.clone(),
+            errors: errors.clone(),
+        });
+    }
+    (git_memory, errors, duration_ms)
+}
+
 /// Implementation of `collect_git_memory` in `the runtime contract`. Discovers every git
 /// repo rooted at the town root or a crew path, fans out the four per-repo
 /// commands (`status`, `log`, `branch`, `worktree list`) in parallel via
@@ -3054,6 +3377,34 @@ pub async fn collect_convoy_data(gt_root: &Path) -> (Value, Vec<Value>, u64) {
     )
 }
 
+async fn collect_convoy_data_cached(
+    gt_root: &Path,
+    cache: &Mutex<SnapshotIoCache>,
+) -> (Value, Vec<Value>, u64) {
+    {
+        let cache = cache.lock().expect("snapshot io cache lock poisoned");
+        if let Some(cached) = &cache.convoys {
+            if cached.gt_root == gt_root
+                && cached.collected_at.elapsed() <= DB_BACKED_COLLECTION_TTL
+            {
+                return (cached.convoys.clone(), cached.errors.clone(), 0);
+            }
+        }
+    }
+
+    let (convoys, errors, duration_ms) = collect_convoy_data(gt_root).await;
+    {
+        let mut cache = cache.lock().expect("snapshot io cache lock poisoned");
+        cache.convoys = Some(CachedConvoyCollection {
+            gt_root: gt_root.to_path_buf(),
+            collected_at: Instant::now(),
+            convoys: convoys.clone(),
+            errors: errors.clone(),
+        });
+    }
+    (convoys, errors, duration_ms)
+}
+
 /// Implementation of `finalize_graph` in `the runtime contract`. Takes the raw
 /// `bead_data` graph (nodes + edges) and layers on:
 ///
@@ -3542,6 +3893,7 @@ async fn collect_agents(
     status_summary: &StatusSummary,
     crews: &[Value],
     feed_events: &[Value],
+    hook_by_agent: &HashMap<String, Value>,
 ) -> (
     Vec<AgentInfo>,
     HashMap<String, Vec<String>>,
@@ -3633,63 +3985,26 @@ async fn collect_agents(
 
     let (event_map, task_event_map) = classify_feed_events(feed_events);
 
-    // Parallel `gt hook show <target> --json` — one call per agent — and build
-    // the `hook_by_issue` inverted index.
+    // Hook state is already included in the bulk hooked bead query. Building
+    // the per-agent view here avoids one `gt hook show` subprocess per agent
+    // on every refresh.
     let mut hook_by_issue: HashMap<String, Vec<String>> = HashMap::new();
-    if !agents_by_target.is_empty() {
-        let max_workers = worker_count(agents_by_target.len(), 8);
-        let mut futures: Vec<tokio::task::JoinHandle<(String, crate::command::CommandResult)>> =
-            Vec::with_capacity(agents_by_target.len());
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(max_workers));
-        for target in agents_by_target.keys().cloned() {
-            let permit_sem = semaphore.clone();
-            let gt_root_owned: PathBuf = gt_root.to_path_buf();
-            futures.push(tokio::spawn(async move {
-                let _permit = permit_sem.acquire_owned().await.expect("semaphore open");
-                let result = run_command(
-                    &[
-                        "gt".to_string(),
-                        "hook".to_string(),
-                        "show".to_string(),
-                        target.clone(),
-                        "--json".to_string(),
-                    ],
-                    &gt_root_owned,
-                    RunOptions::default()
-                        .with_timeout(Duration::from_secs(2))
-                        .parse_json(),
-                )
-                .await;
-                (target, result)
-            }));
-        }
-        for handle in futures {
-            let (target, hook_result) = match handle.await {
-                Ok(pair) => pair,
-                Err(_) => continue,
-            };
-            duration_ms += hook_result.duration_ms;
-            let Some(agent) = agents_by_target.get_mut(&target) else {
-                continue;
-            };
-            if !hook_result.ok {
-                errors.push(hook_result.to_error());
-                agent.hook = json!({"agent": target, "status": "unknown"});
-            } else {
-                let data = hook_result.data.unwrap_or(Value::Null);
-                let bead_id = data
-                    .get("bead_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                agent.hook = data;
-                if !bead_id.is_empty() {
-                    hook_by_issue
-                        .entry(bead_id)
-                        .or_default()
-                        .push(target.clone());
-                }
-            }
+    for (target, agent) in agents_by_target.iter_mut() {
+        let data = hook_by_agent
+            .get(target)
+            .cloned()
+            .unwrap_or_else(|| json!({"agent": target, "status": "empty"}));
+        let bead_id = data
+            .get("bead_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        agent.hook = data;
+        if !bead_id.is_empty() {
+            hook_by_issue
+                .entry(bead_id)
+                .or_default()
+                .push(target.clone());
         }
     }
 
@@ -4420,7 +4735,7 @@ mod tests {
             ..StatusSummary::default()
         };
         let (agents, hook_by_issue, _errors, _ms) =
-            collect_agents(&tmp_root(), &status, &[], &[]).await;
+            collect_agents(&tmp_root(), &status, &[], &[], &HashMap::new()).await;
         for agent in &agents {
             // Every agent must carry a non-empty target and a resolved role.
             assert!(!agent.target.is_empty());
