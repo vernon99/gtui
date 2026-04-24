@@ -604,14 +604,24 @@ pub fn parse_claude_transcript(cache: &mut ClaudeCache, path: &Path) -> Value {
                                     json!({"tool": tool_name, "summary": summary}),
                                 );
                             }
-                            items.push(json!({
+                            let mut tool_item = json!({
                                 "kind": "tool_call",
                                 "tool": tool_name,
                                 "summary": summary,
                                 "call_id": call_id,
                                 "time": time,
                                 "timestamp": timestamp,
-                            }));
+                            });
+                            if let Some(command) = tool_input.get("command").and_then(Value::as_str)
+                            {
+                                tool_item["command"] = json!(command);
+                            }
+                            if let Some(description) =
+                                tool_input.get("description").and_then(Value::as_str)
+                            {
+                                tool_item["description"] = json!(description);
+                            }
+                            items.push(tool_item);
                         }
                         "thinking" => {
                             let reasoning_item = json!({
@@ -937,11 +947,35 @@ fn extract_claude_text_block(block: &Value) -> String {
 }
 
 fn stringify_claude_tool_output(tool_result: Option<&Value>, fallback: Option<&Value>) -> String {
-    let candidate = tool_result
-        .filter(|value| !value.is_null())
-        .or(fallback)
-        .unwrap_or(&Value::Null);
-    value_to_text(candidate)
+    if let Some(result) = tool_result.filter(|value| !value.is_null()) {
+        if let Some(text) = structured_tool_result_text(result) {
+            return text;
+        }
+        let text = value_to_text(result);
+        if !text.trim().is_empty() {
+            return text;
+        }
+    }
+    value_to_text(fallback.unwrap_or(&Value::Null))
+}
+
+fn structured_tool_result_text(value: &Value) -> Option<String> {
+    let obj = value.as_object()?;
+    let has_process_output = obj.contains_key("stdout") || obj.contains_key("stderr");
+    if !has_process_output {
+        return None;
+    }
+
+    let mut parts = Vec::new();
+    for key in ["stdout", "stderr"] {
+        if let Some(text) = obj.get(key).and_then(Value::as_str) {
+            let trimmed = text.trim_end();
+            if !trimmed.is_empty() {
+                parts.push(trimmed.to_string());
+            }
+        }
+    }
+    Some(parts.join("\n\n"))
 }
 
 fn value_to_text(value: &Value) -> String {
@@ -1001,7 +1035,8 @@ fn summarize_tool_output(text: &str) -> String {
     let first = text
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty())
+        .filter(|line| !line.is_empty())
+        .find(|line| line.chars().any(char::is_alphanumeric))
         .unwrap_or("");
     if first.is_empty() {
         "Tool returned no output.".to_string()
@@ -1025,7 +1060,7 @@ fn excerpt_tool_output(text: &str) -> String {
         clipped.extend_from_slice(&lines[lines.len().saturating_sub(8)..]);
         lines = clipped;
     }
-    clip_text(&lines.join("\n"), 3200)
+    clip_text_preserving_whitespace(&lines.join("\n"), 3200)
 }
 
 fn clip_text(text: &str, limit: usize) -> String {
@@ -1035,6 +1070,15 @@ fn clip_text(text: &str, limit: usize) -> String {
     }
     let keep = limit.saturating_sub(3);
     let prefix: String = compact.chars().take(keep).collect();
+    format!("{}...", prefix.trim_end())
+}
+
+fn clip_text_preserving_whitespace(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let keep = limit.saturating_sub(3);
+    let prefix: String = text.chars().take(keep).collect();
     format!("{}...", prefix.trim_end())
 }
 
@@ -1283,6 +1327,33 @@ mod tests {
         assert_eq!(items[2]["kind"], "tool_output");
         assert_eq!(items[2]["tool"], "exec_command");
         assert_eq!(items[3]["kind"], "assistant");
+    }
+
+    #[test]
+    fn parse_claude_transcript_unwraps_bash_result_stdout() {
+        let dir = tempdir();
+        let path = write_jsonl(
+            dir.path(),
+            "claude-1.jsonl",
+            &[
+                r#"{"type":"assistant","timestamp":"2026-04-22T10:00:00Z","message":{"role":"assistant","model":"claude-opus-4-7","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"gt mail archive hq-123","description":"Archive stale messages"}}]}}"#,
+                r#"{"type":"user","timestamp":"2026-04-22T10:00:01Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"fallback output"}]}]},"toolUseResult":{"interrupted":false,"isImage":false,"noOutputExpected":false,"stderr":"","stdout":">\nArchived 25 messages"}}"#,
+            ],
+        );
+
+        let mut cache = ClaudeCache::default();
+        let view = parse_claude_transcript(&mut cache, &path);
+        let items = view["items"].as_array().expect("items array");
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["kind"], "tool_call");
+        assert_eq!(items[0]["tool"], "Bash");
+        assert_eq!(items[0]["command"], "gt mail archive hq-123");
+        assert_eq!(items[0]["description"], "Archive stale messages");
+        assert_eq!(items[1]["kind"], "tool_output");
+        assert_eq!(items[1]["tool"], "Bash");
+        assert_eq!(items[1]["summary"], "Archived 25 messages");
+        assert_eq!(items[1]["text"], ">\nArchived 25 messages");
     }
 
     #[test]
