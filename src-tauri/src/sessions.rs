@@ -492,12 +492,7 @@ pub fn parse_claude_transcript(cache: &mut ClaudeCache, path: &Path) -> Value {
                     .map(str::trim)
                     .filter(|text| !text.is_empty())
                 {
-                    items.push(json!({
-                        "kind": "user",
-                        "text": text,
-                        "time": time,
-                        "timestamp": timestamp,
-                    }));
+                    items.push(transcript_user_text_item(text, &time, &timestamp));
                     continue;
                 }
                 let Some(blocks) = content.as_array() else {
@@ -532,12 +527,7 @@ pub fn parse_claude_transcript(cache: &mut ClaudeCache, path: &Path) -> Value {
                         "text" => {
                             let text = extract_claude_text_block(block);
                             if !text.is_empty() {
-                                items.push(json!({
-                                    "kind": "user",
-                                    "text": text,
-                                    "time": time,
-                                    "timestamp": timestamp,
-                                }));
+                                items.push(transcript_user_text_item(&text, &time, &timestamp));
                             }
                         }
                         _ => {}
@@ -770,6 +760,14 @@ pub fn parse_codex_transcript(cache: &mut CodexCache, path: &Path) -> Value {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
+                if role == "user" {
+                    let mut item = transcript_user_text_item(&text, &time, &timestamp);
+                    if !phase.is_empty() {
+                        item["phase"] = json!(phase);
+                    }
+                    items.push(item);
+                    continue;
+                }
                 items.push(json!({
                     "kind": role,
                     "phase": phase,
@@ -916,6 +914,48 @@ fn is_hidden_transcript_message(text: &str) -> bool {
         return true;
     }
     if normalized.starts_with("# AGENTS.md instructions for ") {
+        return true;
+    }
+    false
+}
+
+fn transcript_user_text_item(text: &str, time: &str, timestamp: &str) -> Value {
+    if is_system_generated_user_text(text) {
+        return json!({
+            "kind": "event",
+            "event_type": "system",
+            "summary": text,
+            "text": text,
+            "time": time,
+            "timestamp": timestamp,
+        });
+    }
+    json!({
+        "kind": "user",
+        "text": text,
+        "time": time,
+        "timestamp": timestamp,
+    })
+}
+
+fn is_system_generated_user_text(text: &str) -> bool {
+    let normalized = text.trim();
+    if normalized.is_empty() {
+        return false;
+    }
+    if normalized.starts_with("<system-reminder>") {
+        return true;
+    }
+    if normalized.contains("Escalation mail from ")
+        && normalized.contains("Run 'gt mail read ")
+        && normalized.contains("gt escalate ack ")
+    {
+        return true;
+    }
+    if normalized.starts_with("Remember to reply to ")
+        && normalized.contains(" via `gt mail send ")
+        && normalized.contains("not in chat")
+    {
         return true;
     }
     false
@@ -1357,6 +1397,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_claude_transcript_marks_system_generated_user_text_as_event() {
+        let dir = tempdir();
+        let path = write_jsonl(
+            dir.path(),
+            "claude-system-nudge.jsonl",
+            &[
+                r#"{"type":"user","timestamp":"2026-04-22T10:00:00Z","message":{"role":"user","content":"🚨 Escalation mail from deacon/dogs/alpha. ID: hq-wisp-0kfdg. Severity: high. Subject: [HIGH] Dolt: hq database has 593 open wisps. Run 'gt mail read hq-wisp-0kfdg' or 'gt escalate ack hq-wisp-0kfdg'."}}"#,
+                r#"{"type":"user","timestamp":"2026-04-22T10:00:01Z","message":{"role":"user","content":"actual human prompt"}}"#,
+            ],
+        );
+
+        let mut cache = ClaudeCache::default();
+        let view = parse_claude_transcript(&mut cache, &path);
+        let items = view["items"].as_array().expect("items array");
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["kind"], "event");
+        assert_eq!(items[0]["event_type"], "system");
+        assert!(items[0]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("Escalation mail from deacon/dogs/alpha"));
+        assert_eq!(items[1]["kind"], "user");
+        assert_eq!(items[1]["text"], "actual human prompt");
+    }
+
+    #[test]
     fn parse_codex_transcript_keeps_trailing_reasoning() {
         let dir = tempdir();
         let path = write_jsonl(
@@ -1372,6 +1439,32 @@ mod tests {
         let items = view["items"].as_array().expect("items array");
         assert_eq!(items.len(), 2);
         assert_eq!(items[1]["kind"], "reasoning");
+    }
+
+    #[test]
+    fn parse_codex_transcript_marks_system_reminders_as_events() {
+        let dir = tempdir();
+        let path = write_jsonl(
+            dir.path(),
+            "rollout-system-nudge.jsonl",
+            &[
+                r#"{"type":"response_item","timestamp":"2026-04-22T10:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<system-reminder>\nQUEUED NUDGE (1 urgent):\n\n  [URGENT from deacon/] 🚨 Escalation mail from deacon/. ID: hq-wisp-680o0. Severity: critical. Subject: [CRITICAL] Dolt down. Run 'gt mail read hq-wisp-680o0' or 'gt escalate ack hq-wisp-680o0'.\n\nHandle urgent nudges before continuing current work.\n</system-reminder>"}]}}"#,
+                r#"{"type":"response_item","timestamp":"2026-04-22T10:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"real input"}]}}"#,
+            ],
+        );
+        let mut cache = CodexCache::default();
+        let view = parse_codex_transcript(&mut cache, &path);
+        let items = view["items"].as_array().expect("items array");
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["kind"], "event");
+        assert_eq!(items[0]["event_type"], "system");
+        assert!(items[0]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("QUEUED NUDGE"));
+        assert_eq!(items[1]["kind"], "user");
+        assert_eq!(items[1]["text"], "real input");
     }
 
     #[test]
